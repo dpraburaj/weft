@@ -17,7 +17,7 @@ Or add it directly to your `flix.toml`:
 
 ```toml
 [dependencies]
-"github:dpraburaj/weft" = { version = "0.6.0", mount = "weft", security = "unrestricted" }
+"github:dpraburaj/weft" = { version = "0.7.0", mount = "weft", security = "unrestricted" }
 ```
 
 > `security = "unrestricted"` is required by Flix because Weft uses Java interop (`HttpServer`, virtual threads) and bundles `org.xerial:sqlite-jdbc`.
@@ -183,7 +183,7 @@ let handle = JobWorker.startBackground(WorkerConfig.default(), () -> ...);
 - `Weft.{Job,JobSpec,JobStatus,JobError,JobQueue,JobStore,JobBackend,JobRegistry,JobWorker,WorkerConfig,WorkerHandle,InMemoryJobStore}` — Background job runner with `uniqueKey` deduplication, stale-job recovery (`reclaimStale`), and transactional outbox (`JobQueue.runWithDb`)
 - `Weft.{HttpClient,ClientRequest,ClientResponse,Env}` — Outbound JDK 21 `HttpClient` effect (with pure `runMock`/`runRecording`) and typed `Env` / `.env` config effect
 - `Weft.{Server,ServerConfig,ServerHandle}` — JDK 21 virtual-thread HTTP/1.1 server with binary streaming and configurable `maxBodyBytes` cap (`413 Payload Too Large`)
-- `Weft.{TestClient,TestEffects}` — In-memory `TestClient` (`get`, `postJson`, `postForm`, `postBytes`, `postMultipart`) and deterministic pure `TestEffects` (`Logger`, `Time.Clock`)
+- `Weft.{TestClient,TestSession,TestEffects}` — Stateless `TestClient` (`get`, `postJson`, `postForm`, `postBytes`, `postMultipart`, `extractCsrfToken`), pure stateful `TestSession` (cookie jar + automatic redirect following for multi-step journeys), and deterministic pure `TestEffects` (`Logger`, `Time.Clock`)
 
 ## Examples
 

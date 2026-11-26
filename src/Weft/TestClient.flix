@@ -66,4 +66,73 @@ pub mod Weft.TestClient {
             |> Request.withHeader("Content-Type", "application/json")
             |> Request.withBody(Json.encode(payload)))
 
+    // --- HTML / CSRF Extraction Helpers for Tests ---
+
+    ///
+    /// Extracts a CSRF token from an HTML response body, checking
+    /// `<meta name="csrf-token" content="...">` first and then
+    /// `<input ... name="_csrf" ... value="...">`.
+    ///
+    pub def extractCsrfToken(res: Response): Option[String] = {
+        let html = Response.body(res);
+        match extractMetaContent("csrf-token", html) {
+            case Some(tok) => Some(tok)
+            case None      => extractInputValue("_csrf", res)
+        }
+    }
+
+    ///
+    /// Extracts the `value="..."` attribute from an `<input ... name="<fieldName>" ...>` tag
+    /// in an HTML response body.
+    ///
+    pub def extractInputValue(fieldName: String, res: Response): Option[String] = {
+        let html = Response.body(res);
+        let nameAttr = "name=\"${fieldName}\"";
+        match String.indexOfLeft({substr = nameAttr}, html) {
+            case None => None
+            case Some(nameIdx) =>
+                let tagStart = match String.indexOfRight({substr = "<input"}, String.sliceLeft({end = nameIdx}, html)) {
+                    case Some(i) => i
+                    case None    => nameIdx
+                };
+                let afterStart = String.sliceRight({start = tagStart}, html);
+                let tag = match String.indexOfLeft({substr = ">"}, afterStart) {
+                    case Some(endIdx) => String.sliceLeft({end = endIdx}, afterStart)
+                    case None         => afterStart
+                };
+                extractQuotedAttr("value", tag)
+        }
+    }
+
+    def extractMetaContent(metaName: String, html: String): Option[String] = {
+        let nameAttr = "name=\"${metaName}\"";
+        match String.indexOfLeft({substr = nameAttr}, html) {
+            case None => None
+            case Some(nameIdx) =>
+                let tagStart = match String.indexOfRight({substr = "<meta"}, String.sliceLeft({end = nameIdx}, html)) {
+                    case Some(i) => i
+                    case None    => nameIdx
+                };
+                let afterStart = String.sliceRight({start = tagStart}, html);
+                let tag = match String.indexOfLeft({substr = ">"}, afterStart) {
+                    case Some(endIdx) => String.sliceLeft({end = endIdx}, afterStart)
+                    case None         => afterStart
+                };
+                extractQuotedAttr("content", tag)
+        }
+    }
+
+    def extractQuotedAttr(attrName: String, tag: String): Option[String] = {
+        let prefix = "${attrName}=\"";
+        match String.indexOfLeft({substr = prefix}, tag) {
+            case None => None
+            case Some(idx) =>
+                let rest = String.sliceRight({start = idx + String.length(prefix)}, tag);
+                match String.indexOfLeft({substr = "\""}, rest) {
+                    case Some(endIdx) => Some(String.sliceLeft({end = endIdx}, rest))
+                    case None         => None
+                }
+        }
+    }
+
 }
