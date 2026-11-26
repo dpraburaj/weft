@@ -71,7 +71,8 @@ Instead of threading a mutable `Context` god-object or nesting monad-transformer
 |---|---|---|
 | `Weft.Req` | Ambient read access to the current HTTP request (path params, query params, headers, cookies, body) | Handled automatically by `Router.toApp` |
 | `Weft.Res` | Ambient response headers, cookies, and status overrides from anywhere in the call stack | Handled purely via local `region` by `Router.toApp` |
-| `Weft.HttpError` | Zero-shot short-circuiting HTTP errors (`400`, `401`, `403`, `404`, `409`, `422`, `500`, ...) | Discharged by `Middleware.errorJson`, `Middleware.errorText`, or `Middleware.errorWith` |
+| `Weft.Html` | Ergonomic, XSS-safe, effect-polymorphic HTML builder (`Html.page`, `Html.render`, automatic `cls` merging, `each`/`when`/`whenSome`) | Handled purely via local `region` by `Html.render` / `Html.page`, producing `HtmlDoc` (`IntoResponse`) |
+| `Weft.HttpError` | Zero-shot short-circuiting HTTP errors (`400`, `401`, `403`, `404`, `409`, `422`, `500`, ...) | Discharged by `Middleware.errorJson`, `Middleware.errorText`, `Middleware.errorHtml`, or `Middleware.errorWith` |
 | `Weft.Auth` | Capability effect representing an authenticated `Principal` (`Auth.userName()`, `Auth.requireRole(...)`) | Discharged per-route or per-subrouter via `Router.withMiddleware(Middleware.bearerAuth(verify))` |
 | `Weft.Db` & `Weft.DbError` | Driver-agnostic relational SQL effect (parameterized queries, transactions, migrations) & structured DB error effect | Handled by `Sqlite.runWith(db)` (or pure `Db.runMock`) and `Middleware.dbErrorToHttp` (`ConstraintViolation` -> `409 Conflict`) |
 | `Weft.JobQueue`, `JobStore` & `JobError` | Algebraic-effect background job producer, pluggable storage backend, and retry/dead-letter failure effect | Handled purely via `JobStore.runPure` in tests, or switched between `JobBackend.inMemory()` and `JobBackend.sqlite(db)` in production |
@@ -165,9 +166,10 @@ let handle = JobWorker.startBackground(WorkerConfig.default(), () -> ...);
 - `Weft.{Method,Status,Headers,SameSite,Cookie,Request,Response,WithStatus,IntoResponse}` — HTTP value types and `IntoResponse` trait
 - `Weft.Url` — UTF-8 percent-encoding/decoding, query parsing, path normalization
 - `Weft.Json` — Pure Flix RFC 8259 JSON AST, encoder, parser, and `HttpError`-integrated extractors
+- `Weft.{Html,HtmlDoc}` — Ergonomic, XSS-safe algebraic-effect HTML builder (`IntoResponse`, class merging, control-flow & HTMX helpers)
 - `Weft.{HttpError,Req,Res,Principal,Auth}` — Core HTTP algebraic effects and handlers
 - `Weft.Router` — Effect-polymorphic `Router[ef]` (`:param`, `*wildcard`, `scope`, `merge`, `withMiddleware`, `HEAD` fallback, `405` + `Allow`)
-- `Weft.{CorsConfig,Middleware}` — `errorJson`, `errorText`, `errorWith`, `dbErrorToHttp`, `recoverAbort`, `bearerAuth`, `requireRole`, `requestLogger`, `timingHeader`, `cors`, `securityHeaders`
+- `Weft.{CorsConfig,Middleware}` — `errorJson`, `errorText`, `errorHtml`, `errorWith`, `dbErrorToHttp`, `recoverAbort`, `bearerAuth`, `requireRole`, `requestLogger`, `timingHeader`, `cors`, `securityHeaders`
 - `Weft.{Db,DbError,DbErrorKind,SqlValue,Row,Migration}` & `Weft.Db.{Sqlite,SqliteConfig,SqliteDb}` — Driver-agnostic SQL effects + thread-safe SQLite backend
 - `Weft.{Job,JobSpec,JobStatus,JobError,JobQueue,JobStore,JobBackend,JobRegistry,JobWorker,WorkerConfig,WorkerHandle,InMemoryJobStore}` — Background job runner
 - `Weft.{Server,ServerConfig,ServerHandle}` — JDK 21 virtual-thread HTTP/1.1 server
@@ -181,6 +183,7 @@ Complete, runnable Flix projects live in [`examples/`](examples/README.md):
 - [`examples/custom-effects`](examples/custom-effects/) — Custom domain effects (`BookmarkStore`, `Notifier`), Bearer auth + RBAC, and zero-IO pure HTTP tests
 - [`examples/sqlite-notes`](examples/sqlite-notes/) — Persistent SQLite REST API, migrations, `Db.transactionHttp` atomic batch rollback, and `409 Conflict` mapping
 - [`examples/background-jobs`](examples/background-jobs/) — HTTP API + Java 21 virtual-thread `JobWorker`, delayed jobs, exponential backoff retries, and deterministic clock-driven tests
+- [`examples/html-ssr`](examples/html-ssr/) — Server-rendered HTML with the `Weft.Html` algebraic-effect builder, form handling, `Middleware.errorHtml`, and pure SSR tests
 
 ```bash
 cd examples/hello-world

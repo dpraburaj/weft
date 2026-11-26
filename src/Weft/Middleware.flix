@@ -33,6 +33,14 @@ pub mod Weft.Middleware {
         } with HttpError.runAsText
 
     ///
+    /// Discharges `HttpError` by rendering HTML error pages.
+    ///
+    pub def errorHtml(app: App[ef]): App[ef - HttpError] = req ->
+        run {
+            app(req)
+        } with HttpError.runAsHtml
+
+    ///
     /// Discharges `HttpError` using a custom `(Status, String) -> Response` renderer.
     ///
     pub def errorWith(render: (Status, String) -> Response \ ef2, app: App[ef1]): App[(ef1 - HttpError) + ef2] = req ->

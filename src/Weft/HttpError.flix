@@ -1,4 +1,6 @@
 pub mod Weft.HttpError {
+    use Weft.Html
+    use Weft.HtmlDoc
     use Weft.HttpError
     use Weft.Json
     use Weft.Response
@@ -97,5 +99,20 @@ pub mod Weft.HttpError {
         runWith((st, msg) ->
             Response.text(msg) |> Response.withStatus(st)
         , f)
+
+    ///
+    /// Handles `HttpError` by rendering a clean, HTML-escaped error page.
+    ///
+    pub def runAsHtml(f: Unit -> Response \ ef): Response \ (ef - HttpError) =
+        runWith((st, msg) -> {
+            let titleStr = "${Status.code(st)} ${Status.reason(st)}";
+            let doc = Html.page(titleStr, () -> {
+                Html.main_(() -> {
+                    Html.h1Text(titleStr);
+                    Html.pText(msg)
+                })
+            });
+            HtmlDoc.toResponseWithStatus(st, doc)
+        }, f)
 
 }

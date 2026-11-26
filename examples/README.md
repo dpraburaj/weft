@@ -10,6 +10,7 @@ Each directory below is a standalone Flix project demonstrating a different slic
 | [`custom-effects`](custom-effects/) | Defining your own domain algebraic effects (`BookmarkStore`, `Notifier`), Bearer auth & role checks on a protected sub-router, thread-safe live IO handlers, and **zero-IO pure end-to-end HTTP tests**. |
 | [`sqlite-notes`](sqlite-notes/) | Persistent REST API backed by embedded SQLite, forward-only `Migration.runAll`, `Db.transactionHttp` atomic batch rollback on `HttpError`/`DbError`, `Middleware.dbErrorToHttp` (`409 Conflict`), CORS, security headers, and RBAC. |
 | [`background-jobs`](background-jobs/) | HTTP API dispatching immediate & delayed jobs via `JobQueue`, Java 21 virtual-thread `JobWorker` pool, exponential backoff retries via `JobError`, and deterministic zero-sleep pure worker tests with `JobStore.runPure` & `TestEffects.runManualClock`. |
+| [`html-ssr`](html-ssr/) | Ergonomic server-rendered HTML with the `Weft.Html` algebraic-effect builder (`Html.pageWithHead`, `clsIf`, `each`, `whenSome`), form handling, `Middleware.errorHtml`, and pure zero-IO SSR tests. |
 
 ## Running Any Example
 
