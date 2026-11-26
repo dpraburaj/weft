@@ -1,0 +1,11 @@
+*.fpkg
+*.jar
+.GITHUB_TOKEN
+artifact/
+build/
+lib/
+crash_report_*.txt
+*.db
+*.db-wal
+*.db-shm
+.DS_Store
