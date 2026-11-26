@@ -1,5 +1,6 @@
 pub mod Weft.Cookie {
     use Weft.Cookie
+    use Weft.Crypto
     use Weft.SameSite
 
     ///
@@ -46,6 +47,20 @@ pub mod Weft.Cookie {
             secure   = false,
             sameSite = Some(SameSite.Lax)
         })
+
+    ///
+    /// Creates an HMAC-SHA256 signed `Cookie` whose value is tamper-evident.
+    /// Verify incoming values with `Cookie.verifySigned` or `Req.signedCookie`.
+    ///
+    pub def makeSigned(secret: String, name: String, value: String): Cookie =
+        make(name, Crypto.signValue(secret, value))
+
+    ///
+    /// Verifies a signed cookie value created by `Cookie.makeSigned`, returning `Some(value)`
+    /// if authentic or `None` if tampered.
+    ///
+    pub def verifySigned(secret: String, rawValue: String): Option[String] =
+        Crypto.verifySignedValue(secret, rawValue)
 
     ///
     /// Creates an expired cookie to instruct the client to delete it.

@@ -38,6 +38,8 @@ pub mod Weft.Req {
     pub def param(name: String): Option[String] \ Req          = Request.param(name, Req.request())
     pub def cookies(): Map[String, String] \ Req               = Request.cookies(Req.request())
     pub def cookie(name: String): Option[String] \ Req         = Request.cookie(name, Req.request())
+    pub def signedCookie(secret: String, name: String): Option[String] \ Req =
+        cookie(name) |> Option.flatMap(Weft.Cookie.verifySigned(secret))
     pub def bearerToken(): Option[String] \ Req                = Request.bearerToken(Req.request())
 
     // --- Validating Extractors (`Req` + `HttpError`) ---

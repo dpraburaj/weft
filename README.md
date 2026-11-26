@@ -17,7 +17,7 @@ Or add it directly to your `flix.toml`:
 
 ```toml
 [dependencies]
-"github:dpraburaj/weft" = { version = "0.3.0", mount = "weft", security = "unrestricted" }
+"github:dpraburaj/weft" = { version = "0.4.0", mount = "weft", security = "unrestricted" }
 ```
 
 > `security = "unrestricted"` is required by Flix because Weft uses Java interop (`HttpServer`, virtual threads) and bundles `org.xerial:sqlite-jdbc`.
@@ -73,7 +73,8 @@ Instead of threading a mutable `Context` god-object or nesting monad-transformer
 | `Weft.Res` | Ambient response headers, cookies, and status overrides from anywhere in the call stack | Handled purely via local `region` by `Router.toApp` |
 | `Weft.Html` | Ergonomic, XSS-safe, effect-polymorphic HTML builder (`Html.page`, `Html.render`, automatic `cls` merging, `each`/`when`/`whenSome`) | Handled purely via local `region` by `Html.render` / `Html.page`, producing `HtmlDoc` (`IntoResponse`) |
 | `Weft.HttpError` | Zero-shot short-circuiting HTTP errors (`400`, `401`, `403`, `404`, `409`, `422`, `500`, ...) | Discharged by `Middleware.errorJson`, `Middleware.errorText`, `Middleware.errorHtml`, or `Middleware.errorWith` |
-| `Weft.Auth` | Capability effect representing an authenticated `Principal` (`Auth.userName()`, `Auth.requireRole(...)`) | Discharged per-route or per-subrouter via `Router.withMiddleware(Middleware.bearerAuth(verify))` |
+| `Weft.Auth` & `Weft.OptionalAuth` | Capability effects representing a required or optional authenticated `Principal` (`Auth.userName()`, `Auth.requireRole(...)`, `OptionalAuth.isAuthenticated()`) | Discharged per-route or per-subrouter via `Middleware.bearerAuth`, `Middleware.sessionAuth`, `Middleware.sessionAuthOrRedirect`, `Middleware.optionalSessionAuth`, or `Middleware.optionalBearerAuth` |
+| `Weft.Session`, `SessionStore` & `Random` | Signed cookie-backed sessions with flash messages, anti-fixation ID rotation, CSRF tokens, and deterministic/CSPRNG randomness | Handled purely via `SessionStore.runPure` + `Random.runDeterministic` in tests, or `SessionStore.runInMemory` / `SessionStore.runWithDb` + `Random.runWithSecureRandom` in production |
 | `Weft.Db` & `Weft.DbError` | Driver-agnostic relational SQL effect (parameterized queries, transactions, migrations) & structured DB error effect | Handled by `Sqlite.runWith(db)` (or pure `Db.runMock`) and `Middleware.dbErrorToHttp` (`ConstraintViolation` -> `409 Conflict`) |
 | `Weft.JobQueue`, `JobStore` & `JobError` | Algebraic-effect background job producer, pluggable storage backend, and retry/dead-letter failure effect | Handled purely via `JobStore.runPure` in tests, or switched between `JobBackend.inMemory()` and `JobBackend.sqlite(db)` in production |
 | `Weft.StaticStore` | Algebraic-effect static asset store powering `StaticFiles.routes` (MIME detection, `ETag`/`304`, traversal & dotfile protection) | Handled purely via `StaticStore.runPure` in tests, or `StaticStore.runFromDir(dir)` in production |
@@ -170,9 +171,11 @@ let handle = JobWorker.startBackground(WorkerConfig.default(), () -> ...);
 - `Weft.{Mime,StaticFile,StaticConfig,StaticStore,StaticFiles}` — Effect-polymorphic static file serving with MIME detection, `ETag`/`304 Not Modified`, `Cache-Control`, and path-traversal/dotfile protection
 - `Weft.Json` — Pure Flix RFC 8259 JSON AST, encoder, parser, and `HttpError`-integrated extractors
 - `Weft.{Html,HtmlDoc}` — Ergonomic, XSS-safe algebraic-effect HTML builder (`IntoResponse`, class merging, control-flow & HTMX helpers)
-- `Weft.{HttpError,Req,Res,Principal,Auth}` — Core HTTP algebraic effects and handlers (JSON, URL-encoded form, and multipart extractors)
+- `Weft.{HttpError,Req,Res,Principal,Auth,OptionalAuth}` — Core HTTP & auth algebraic effects (JSON, URL-encoded form, signed cookie, and multipart extractors; Bearer + session auth)
+- `Weft.{Random,Crypto,CsrfConfig,Csrf}` — CSPRNG/deterministic `Random` effect, SHA-256, HMAC-SHA256 webhook & cookie signing, PBKDF2-HMAC-SHA256 password hashing, constant-time comparisons, and CSRF protection (`Csrf.hiddenInput`, `Csrf.metaTag`, `Middleware.csrf`)
+- `Weft.{Session,SessionConfig,SessionData,SessionStore,InMemorySessionStore}` — Signed cookie sessions with flash messages, session rotation (`Auth.loginSession`), and Pure / InMemory / SQLite storage backends
 - `Weft.Router` — Effect-polymorphic `Router[ef]` (`:param`, `*wildcard`, `scope`, `merge`, `withMiddleware`, `HEAD` fallback, `405` + `Allow`)
-- `Weft.{CorsConfig,Middleware}` — `errorJson`, `errorText`, `errorHtml`, `errorWith`, `dbErrorToHttp`, `recoverAbort`, `bearerAuth`, `requireRole`, `maxBodySize`, `limitBodySize`, `requestLogger`, `timingHeader`, `cors`, `securityHeaders`
+- `Weft.{CorsConfig,Middleware}` — `errorJson`, `errorText`, `errorHtml`, `errorWith`, `dbErrorToHttp`, `recoverAbort`, `session`, `bearerAuth`, `sessionAuth`, `sessionAuthOrRedirect`, `optionalSessionAuth`, `optionalBearerAuth`, `requireRole`, `csrf`, `csrfApp`, `maxBodySize`, `limitBodySize`, `requestLogger`, `timingHeader`, `cors`, `securityHeaders`
 - `Weft.{Db,DbError,DbErrorKind,SqlValue,Row,Migration}` & `Weft.Db.{Sqlite,SqliteConfig,SqliteDb}` — Driver-agnostic SQL effects + thread-safe SQLite backend
 - `Weft.{Job,JobSpec,JobStatus,JobError,JobQueue,JobStore,JobBackend,JobRegistry,JobWorker,WorkerConfig,WorkerHandle,InMemoryJobStore}` — Background job runner
 - `Weft.{Server,ServerConfig,ServerHandle}` — JDK 21 virtual-thread HTTP/1.1 server with binary streaming and configurable `maxBodyBytes` cap (`413 Payload Too Large`)

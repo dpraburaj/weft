@@ -2,15 +2,22 @@ pub mod Weft.Middleware {
     use Weft.App
     use Weft.Auth
     use Weft.CorsConfig
+    use Weft.Csrf
+    use Weft.CsrfConfig
     use Weft.DbError
     use Weft.Handler
     use Weft.HttpError
     use Weft.Json
     use Weft.Method
+    use Weft.OptionalAuth
     use Weft.Principal
+    use Weft.Random
     use Weft.Req
     use Weft.Request
     use Weft.Response
+    use Weft.Session
+    use Weft.SessionConfig
+    use Weft.SessionStore
     use Weft.Status
     use Time.Clock
 
@@ -92,6 +99,85 @@ pub mod Weft.Middleware {
         h: Handler[ef1]
     ): Handler[(ef1 - Auth) + {Req, HttpError} + ef2] = () ->
         Auth.runWithBearer(verify, h)
+
+    ///
+    /// Route middleware that discharges `Auth` from the active `Session`, resolving
+    /// the stored user ID via `loadUser` or raising `401 Unauthorized`.
+    ///
+    pub def sessionAuth(
+        loadUser: String -> Option[Principal] \ ef2,
+        h: Handler[ef1]
+    ): Handler[(ef1 - Auth) + {Session, HttpError} + ef2] = () ->
+        Auth.runWithSession(loadUser, h)
+
+    ///
+    /// SSR route middleware that discharges `Auth` from the active `Session`, redirecting
+    /// unauthenticated users with `303 See Other` to `loginUrl` (instead of raising `401`).
+    ///
+    pub def sessionAuthOrRedirect(
+        loginUrl: String,
+        loadUser: String -> Option[Principal] \ ef2,
+        h: Handler[ef1]
+    ): Handler[(ef1 - Auth) + Session + ef2] = () -> {
+        let pOpt = match Session.get(Auth.sessionUserIdKey()) {
+            case Some(uid) => loadUser(uid)
+            case None      => None
+        };
+        match pOpt {
+            case Some(p) => Auth.runWithPrincipal(p, h)
+            case None    => Response.seeOther(loginUrl)
+        }
+    }
+
+    ///
+    /// Route middleware that discharges `OptionalAuth` from the active `Session`
+    /// without failing for anonymous visitors.
+    ///
+    pub def optionalSessionAuth(
+        loadUser: String -> Option[Principal] \ ef2,
+        h: Handler[ef1]
+    ): Handler[(ef1 - OptionalAuth) + Session + ef2] = () ->
+        OptionalAuth.runWithSession(loadUser, h)
+
+    ///
+    /// Route middleware that discharges `OptionalAuth` from a Bearer token in `Req`
+    /// (missing or invalid tokens resolve to `None`).
+    ///
+    pub def optionalBearerAuth(
+        verify: String -> Option[Principal] \ ef2,
+        h: Handler[ef1]
+    ): Handler[(ef1 - OptionalAuth) + Req + ef2] = () ->
+        OptionalAuth.runWithBearer(verify, h)
+
+    ///
+    /// Route middleware that enforces CSRF synchronizer-token verification against `Session`
+    /// for unsafe HTTP methods (`POST`, `PUT`, `PATCH`, `DELETE`).
+    /// Use on SSR sub-routers while keeping webhook/Bearer-API sub-routers CSRF-free.
+    ///
+    pub def csrf(cfg: CsrfConfig, h: Handler[ef]): Handler[ef + {Req, Session, HttpError}] = () -> {
+        Csrf.verify(cfg);
+        checked_ecast(h())
+    }
+
+    ///
+    /// App-level middleware enforcing CSRF synchronizer-token verification against `Session`.
+    /// Place before `errorJson`/`errorHtml` and inside `Middleware.session`.
+    ///
+    pub def csrfApp(cfg: CsrfConfig, app: App[ef]): App[ef + {Session, HttpError}] = req -> {
+        Csrf.verifyRequest(cfg, req);
+        checked_ecast(app(req))
+    }
+
+    ///
+    /// App-level middleware discharging the `Session` effect using signed cookies and
+    /// `SessionStore`. Place AFTER `errorJson`/`errorHtml` so flashes and session updates
+    /// persist across redirects and error responses.
+    ///
+    pub def session(
+        cfg: SessionConfig,
+        app: App[ef]
+    ): App[(ef - Session) + {SessionStore, Random, Clock}] =
+        Session.middleware(cfg, app)
 
     ///
     /// Route middleware that guards a route or sub-router by requiring a specific role.
