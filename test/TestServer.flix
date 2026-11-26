@@ -4,17 +4,22 @@ mod TestServer {
     use Time.Clock
     use Weft.App
     use Weft.Auth
+    use Weft.Body
     use Weft.Json
     use Weft.Middleware
+    use Weft.Multipart
+    use Weft.MultipartForm
     use Weft.Principal
     use Weft.Req
     use Weft.Res
+    use Weft.Response
     use Weft.Router
     use Weft.Server
     use Weft.ServerConfig
     use Weft.ServerHandle
     use Weft.Status
     use Weft.TestEffects
+    use Weft.UploadedFile
     use Weft.WithStatus
 
     import java.lang.Exception
@@ -115,6 +120,73 @@ mod TestServer {
                 match outcome {
                     case Ok(())   => ()
                     case Err(msg) => Assert.fail("Live HTTP request failed: ${msg}")
+                }
+        }
+    }
+
+    @Test
+    def testLiveBinaryEchoMultipartAndMaxBodyLimit(): Unit \ {Assert, IO} = {
+        let app = Router.empty()
+            |> Router.post("/binary", () -> Response.bytes("application/octet-stream", Req.bodyBytes()))
+            |> Router.post("/upload", () -> {
+                let form = Req.multipartForm();
+                let f = MultipartForm.requireFile("img", form);
+                Response.bytes(UploadedFile.contentType(f), UploadedFile.data(f))
+            })
+            |> Router.toApp
+            |> Middleware.errorJson;
+
+        let ioApp: App[IO] = req -> app(req);
+        let cfg = ServerConfig.local(0) |> ServerConfig.withMaxBodyBytes(256);
+
+        match Server.start(cfg, ioApp) {
+            case Err(msg) =>
+                Assert.fail("Failed to start live binary test server: ${msg}")
+            case Ok(handle) =>
+                let outcome = try {
+                    let baseUrl = ServerHandle.url(handle);
+                    let client = HttpClient.newHttpClient();
+                    let bytesHandler = HttpResponse$BodyHandlers.ofByteArray();
+                    let strHandler = HttpResponse$BodyHandlers.ofString();
+
+                    // 1. Raw binary round-trip preserves non-UTF-8 bytes over TCP
+                    let rawVec = Vector#{-119i8, 80i8, 78i8, 71i8, 13i8, 10i8, 26i8, 10i8, 0i8, -1i8, -2i8};
+                    let rawArr = Vector.toArray(Static, rawVec);
+                    let b0 = HttpRequest.newBuilder(URI.create("${baseUrl}/binary"));
+                    let b1 = b0.header("Content-Type", "application/octet-stream");
+                    let binReq = b1.method("POST", HttpRequest$BodyPublishers.ofByteArray(rawArr)).build();
+                    let binResp = client.send(binReq, bytesHandler);
+                    let binRespBytes: Array[Int8, IO] = binResp.body();
+                    assertEq(expected = 200, binResp.statusCode());
+                    assertEq(expected = rawVec, Array.toVector(binRespBytes));
+
+                    // 2. Live multipart/form-data upload returns exact uploaded bytes
+                    let boundary = "LiveBoundary123";
+                    let uploaded = UploadedFile.make("img", "tiny.png", "image/png", rawVec);
+                    let mpVec = Multipart.encode(boundary, ("title", "Logo") :: Nil, uploaded :: Nil);
+                    let m0 = HttpRequest.newBuilder(URI.create("${baseUrl}/upload"));
+                    let m1 = m0.header("Content-Type", "multipart/form-data; boundary=${boundary}");
+                    let mpReq = m1.method("POST", HttpRequest$BodyPublishers.ofByteArray(Vector.toArray(Static, mpVec))).build();
+                    let mpResp = client.send(mpReq, bytesHandler);
+                    let mpRespBytes: Array[Int8, IO] = mpResp.body();
+                    assertEq(expected = 200, mpResp.statusCode());
+                    assertEq(expected = rawVec, Array.toVector(mpRespBytes));
+
+                    // 3. Payload exceeding ServerConfig.maxBodyBytes (256) is rejected with 413
+                    let bigArr: Array[Int8, IO] = Array.repeat(Static, 300, 65i8);
+                    let g0 = HttpRequest.newBuilder(URI.create("${baseUrl}/binary"));
+                    let g1 = g0.header("Content-Type", "application/octet-stream");
+                    let bigReq = g1.method("POST", HttpRequest$BodyPublishers.ofByteArray(bigArr)).build();
+                    let bigResp = client.send(bigReq, strHandler);
+                    assertEq(expected = 413, bigResp.statusCode());
+                    Ok(())
+                } catch {
+                    case ex: Exception => Err(ex.getMessage())
+                };
+                ServerHandle.stop(0, handle);
+                match outcome {
+                    case Ok(())   => ()
+                    case Err(msg) => Assert.fail("Live binary/multipart HTTP request failed: ${msg}")
                 }
         }
     }

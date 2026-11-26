@@ -12,15 +12,15 @@ pub mod Weft.Server {
     import com.sun.net.httpserver.HttpHandler
     import com.sun.net.httpserver.HttpServer
     import com.sun.net.httpserver.{Headers => JHeaders}
+    import java.io.ByteArrayOutputStream
     import java.io.IOException
+    import java.io.InputStream
     import java.lang.Exception
     import java.lang.InterruptedException
     import java.lang.Runnable
     import java.lang.Runtime
     import java.lang.Thread
-    import java.lang.{String => JString}
     import java.net.InetSocketAddress
-    import java.nio.charset.StandardCharsets
     import java.util.concurrent.CountDownLatch
     import java.util.concurrent.Executors
     import java.util.{List => JList}
@@ -38,7 +38,7 @@ pub mod Weft.Server {
         try {
             let addr = new InetSocketAddress(c#host, c#port);
             let srv = HttpServer.create(addr, c#backlog);
-            let _ctx = srv.createContext("/", makeHttpHandler(app));
+            let _ctx = srv.createContext("/", makeHttpHandler(c#maxBodyBytes, app));
             srv.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
             srv.start();
             Ok(ServerHandle.ServerHandle(srv, c#host))
@@ -74,13 +74,20 @@ pub mod Weft.Server {
 
     // --- JDK HttpExchange <-> Weft Bridge ---
 
-    def makeHttpHandler(app: App[IO]): HttpHandler \ IO =
+    def makeHttpHandler(maxBodyBytes: Int32, app: App[IO]): HttpHandler \ IO =
         new HttpHandler {
             def handle(_this: HttpHandler, exchange: HttpExchange): Unit \ IO =
                 try {
-                    let req = readRequest(exchange);
-                    let res = app(req);
-                    writeResponse(req, res, exchange)
+                    match readRequest(maxBodyBytes, exchange) {
+                        case Ok(req) =>
+                            let res = app(req);
+                            writeResponse(req, res, exchange)
+                        case Err(limitMsg) =>
+                            let tooLarge = Response.text(limitMsg)
+                                |> Response.withStatus(Status.payloadTooLarge());
+                            let dummyReq = Request.make(Method.parse(exchange.getRequestMethod()), "/");
+                            writeResponse(dummyReq, tooLarge, exchange)
+                    }
                 } catch {
                     case ex: Exception =>
                         try {
@@ -94,7 +101,7 @@ pub mod Weft.Server {
                 }
         }
 
-    def readRequest(exchange: HttpExchange): Request \ IO =
+    def readRequest(maxBodyBytes: Int32, exchange: HttpExchange): Result[String, Request] \ IO =
         let method = Method.parse(exchange.getRequestMethod());
         let uri = exchange.getRequestURI();
         let rawPath = uri.getRawPath();
@@ -102,11 +109,53 @@ pub mod Weft.Server {
         let fullRawPath = if (Object.isNull(rawQueryObj)) rawPath else "${rawPath}?${rawQueryObj}";
         let jHeaders = exchange.getRequestHeaders();
         let flixHeaders = readHeaders(jHeaders);
-        let bodyBytes = exchange.getRequestBody().readAllBytes();
-        let bodyStr = new JString(bodyBytes, StandardCharsets.UTF_8);
-        Request.make(method, fullRawPath)
-            |> Request.withHeaders(flixHeaders)
-            |> Request.withBody(bodyStr)
+        let declaredTooLarge = if (maxBodyBytes > 0) {
+            match Headers.get("Content-Length", flixHeaders) {
+                case Some(clStr) => match Int64.fromString(String.trim(clStr)) {
+                    case Some(cl) => cl > Int32.toInt64(maxBodyBytes)
+                    case None     => false
+                }
+                case None => false
+            }
+        } else {
+            false
+        };
+        if (declaredTooLarge)
+            Err("Request body exceeds maximum allowed size of ${maxBodyBytes} bytes")
+        else
+            match readBoundedBytes(exchange.getRequestBody(), maxBodyBytes) {
+                case Err(msg) => Err(msg)
+                case Ok(bodyVec) =>
+                    Ok(
+                        Request.make(method, fullRawPath)
+                            |> Request.withHeaders(flixHeaders)
+                            |> Request.withBytes(bodyVec)
+                    )
+            }
+
+    def readBoundedBytes(stream: InputStream, maxBodyBytes: Int32): Result[String, Vector[Int8]] \ IO =
+        if (maxBodyBytes <= 0) {
+            let all = stream.readAllBytes();
+            Ok(Array.toVector(all))
+        } else {
+            let out = new ByteArrayOutputStream();
+            let buf: Array[Int8, IO] = Array.repeat(Static, 8192, 0i8);
+            def loop(total: Int32): Result[String, Vector[Int8]] \ IO = {
+                let n = stream.read(buf, 0, 8192);
+                if (n < 0) {
+                    Ok(Array.toVector(out.toByteArray()))
+                } else {
+                    let nextTotal = total + n;
+                    if (nextTotal > maxBodyBytes)
+                        Err("Request body exceeds maximum allowed size of ${maxBodyBytes} bytes")
+                    else {
+                        out.write(buf, 0, n);
+                        loop(nextTotal)
+                    }
+                }
+            };
+            loop(0)
+        }
 
     def readHeaders(jHeaders: JHeaders): Headers \ IO =
         let keyIter = jHeaders.keySet().iterator();
@@ -145,13 +194,13 @@ pub mod Weft.Server {
             exchange.sendResponseHeaders(statusCode, -1i64);
             exchange.close()
         } else {
-            let bodyStr = Response.body(res);
-            let bodyBytes = bodyStr.getBytes(StandardCharsets.UTF_8);
-            let len = Array.length(bodyBytes);
+            let bodyVec = Response.bodyBytes(res);
+            let len = Vector.length(bodyVec);
             if (len == 0) {
                 exchange.sendResponseHeaders(statusCode, -1i64);
                 exchange.close()
             } else {
+                let bodyBytes = Vector.toArray(Static, bodyVec);
                 exchange.sendResponseHeaders(statusCode, Int32.toInt64(len));
                 let out = exchange.getResponseBody();
                 out.write(bodyBytes);

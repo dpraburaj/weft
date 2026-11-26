@@ -31,18 +31,26 @@ pub mod Weft.Url {
         URLEncoder.encode(s, StandardCharsets.UTF_8)
 
     ///
-    /// Parses a raw query string (with or without leading `?`) into a `Map[String, String]`.
-    /// When a key appears multiple times, the last value wins.
+    /// Encodes a list of `(key, value)` pairs into an `application/x-www-form-urlencoded` string.
     ///
-    pub def parseQuery(rawQuery: String): Map[String, String] =
+    pub def encodeQuery(pairs: List[(String, String)]): String =
+        pairs
+            |> List.map(match (k, v) -> "${encode(k)}=${encode(v)}")
+            |> String.intercalate("&")
+
+    ///
+    /// Parses a raw query string (with or without leading `?`) into a multi-value
+    /// `Map[String, List[String]]`, preserving all occurrences in order.
+    ///
+    pub def parseQueryAll(rawQuery: String): Map[String, List[String]] =
         let cleaned = match String.stripPrefix({substr = "?"}, rawQuery) {
             case Some(rest) => rest
             case None       => rawQuery
         };
         if (String.isEmpty(cleaned))
             Map.empty()
-        else
-            String.splitOn({substr = "&"}, cleaned)
+        else {
+            let reversed = String.splitOn({substr = "&"}, cleaned)
                 |> List.foldLeft((acc, pair) -> {
                     if (String.isEmpty(pair))
                         acc
@@ -51,12 +59,24 @@ pub mod Weft.Url {
                             case Some(idx) =>
                                 let k = decodeQueryComponent(String.sliceLeft({end = idx}, pair));
                                 let v = decodeQueryComponent(String.sliceRight({start = idx + 1}, pair));
-                                Map.insert(k, v, acc)
+                                let prev = Map.getWithDefault(k, Nil, acc);
+                                Map.insert(k, v :: prev, acc)
                             case None =>
                                 let k = decodeQueryComponent(pair);
-                                Map.insert(k, "", acc)
+                                let prev = Map.getWithDefault(k, Nil, acc);
+                                Map.insert(k, "" :: prev, acc)
                         }
-                }, Map.empty())
+                }, Map.empty());
+            Map.map(List.reverse, reversed)
+        }
+
+    ///
+    /// Parses a raw query string (with or without leading `?`) into a `Map[String, String]`.
+    /// When a key appears multiple times, the last value wins.
+    ///
+    pub def parseQuery(rawQuery: String): Map[String, String] =
+        parseQueryAll(rawQuery)
+            |> Map.map(vs -> Option.getWithDefault("", List.last(vs)))
 
     ///
     /// Splits a URL path into non-empty decoded segments.

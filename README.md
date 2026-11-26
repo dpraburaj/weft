@@ -17,7 +17,7 @@ Or add it directly to your `flix.toml`:
 
 ```toml
 [dependencies]
-"github:dpraburaj/weft" = { version = "0.2.0", mount = "weft", security = "unrestricted" }
+"github:dpraburaj/weft" = { version = "0.3.0", mount = "weft", security = "unrestricted" }
 ```
 
 > `security = "unrestricted"` is required by Flix because Weft uses Java interop (`HttpServer`, virtual threads) and bundles `org.xerial:sqlite-jdbc`.
@@ -76,6 +76,7 @@ Instead of threading a mutable `Context` god-object or nesting monad-transformer
 | `Weft.Auth` | Capability effect representing an authenticated `Principal` (`Auth.userName()`, `Auth.requireRole(...)`) | Discharged per-route or per-subrouter via `Router.withMiddleware(Middleware.bearerAuth(verify))` |
 | `Weft.Db` & `Weft.DbError` | Driver-agnostic relational SQL effect (parameterized queries, transactions, migrations) & structured DB error effect | Handled by `Sqlite.runWith(db)` (or pure `Db.runMock`) and `Middleware.dbErrorToHttp` (`ConstraintViolation` -> `409 Conflict`) |
 | `Weft.JobQueue`, `JobStore` & `JobError` | Algebraic-effect background job producer, pluggable storage backend, and retry/dead-letter failure effect | Handled purely via `JobStore.runPure` in tests, or switched between `JobBackend.inMemory()` and `JobBackend.sqlite(db)` in production |
+| `Weft.StaticStore` | Algebraic-effect static asset store powering `StaticFiles.routes` (MIME detection, `ETag`/`304`, traversal & dotfile protection) | Handled purely via `StaticStore.runPure` in tests, or `StaticStore.runFromDir(dir)` in production |
 | `Logger`, `Clock`, `Abort` | Standard Flix library effects used natively by middleware (`requestLogger`, `timingHeader`, `recoverAbort`) | Swapped seamlessly between `IO` in production and 100% pure deterministic handlers in tests |
 | Your domain effects | e.g., `UserRepo`, `Mailer`, `PaymentGateway` | Compile-time verified: `Server.serve` won't compile until every custom effect is handled |
 
@@ -163,17 +164,19 @@ let handle = JobWorker.startBackground(WorkerConfig.default(), () -> ...);
 ## Modules
 
 - `Weft` — Core type aliases (`Handler[ef]`, `App[ef]`, `JobHandler[ef]`)
-- `Weft.{Method,Status,Headers,SameSite,Cookie,Request,Response,WithStatus,IntoResponse}` — HTTP value types and `IntoResponse` trait
-- `Weft.Url` — UTF-8 percent-encoding/decoding, query parsing, path normalization
+- `Weft.{Body,Method,Status,Headers,SameSite,Cookie,Request,Response,WithStatus,IntoResponse}` — HTTP value types (text + binary `Vector[Int8]` bodies) and `IntoResponse` trait
+- `Weft.Url` — UTF-8 percent-encoding/decoding, single & multi-value query/form parsing (`parseQuery`, `parseQueryAll`, `encodeQuery`), path normalization
+- `Weft.{Multipart,MultipartForm,UploadedFile}` — Pure binary RFC 7578 `multipart/form-data` parser & encoder preserving raw uploaded file bytes
+- `Weft.{Mime,StaticFile,StaticConfig,StaticStore,StaticFiles}` — Effect-polymorphic static file serving with MIME detection, `ETag`/`304 Not Modified`, `Cache-Control`, and path-traversal/dotfile protection
 - `Weft.Json` — Pure Flix RFC 8259 JSON AST, encoder, parser, and `HttpError`-integrated extractors
 - `Weft.{Html,HtmlDoc}` — Ergonomic, XSS-safe algebraic-effect HTML builder (`IntoResponse`, class merging, control-flow & HTMX helpers)
-- `Weft.{HttpError,Req,Res,Principal,Auth}` — Core HTTP algebraic effects and handlers
+- `Weft.{HttpError,Req,Res,Principal,Auth}` — Core HTTP algebraic effects and handlers (JSON, URL-encoded form, and multipart extractors)
 - `Weft.Router` — Effect-polymorphic `Router[ef]` (`:param`, `*wildcard`, `scope`, `merge`, `withMiddleware`, `HEAD` fallback, `405` + `Allow`)
-- `Weft.{CorsConfig,Middleware}` — `errorJson`, `errorText`, `errorHtml`, `errorWith`, `dbErrorToHttp`, `recoverAbort`, `bearerAuth`, `requireRole`, `requestLogger`, `timingHeader`, `cors`, `securityHeaders`
+- `Weft.{CorsConfig,Middleware}` — `errorJson`, `errorText`, `errorHtml`, `errorWith`, `dbErrorToHttp`, `recoverAbort`, `bearerAuth`, `requireRole`, `maxBodySize`, `limitBodySize`, `requestLogger`, `timingHeader`, `cors`, `securityHeaders`
 - `Weft.{Db,DbError,DbErrorKind,SqlValue,Row,Migration}` & `Weft.Db.{Sqlite,SqliteConfig,SqliteDb}` — Driver-agnostic SQL effects + thread-safe SQLite backend
 - `Weft.{Job,JobSpec,JobStatus,JobError,JobQueue,JobStore,JobBackend,JobRegistry,JobWorker,WorkerConfig,WorkerHandle,InMemoryJobStore}` — Background job runner
-- `Weft.{Server,ServerConfig,ServerHandle}` — JDK 21 virtual-thread HTTP/1.1 server
-- `Weft.{TestClient,TestEffects}` — In-memory `TestClient` and deterministic pure `TestEffects` (`Logger`, `Time.Clock`)
+- `Weft.{Server,ServerConfig,ServerHandle}` — JDK 21 virtual-thread HTTP/1.1 server with binary streaming and configurable `maxBodyBytes` cap (`413 Payload Too Large`)
+- `Weft.{TestClient,TestEffects}` — In-memory `TestClient` (`get`, `postJson`, `postForm`, `postBytes`, `postMultipart`) and deterministic pure `TestEffects` (`Logger`, `Time.Clock`)
 
 ## Examples
 

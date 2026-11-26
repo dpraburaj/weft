@@ -25,8 +25,10 @@ pub mod Weft.HttpError {
     pub def forbidden(msg: String): a \ HttpError           = HttpError.raise(Status.forbidden(), msg)
     pub def notFound(msg: String): a \ HttpError            = HttpError.raise(Status.notFound(), msg)
     pub def methodNotAllowed(msg: String): a \ HttpError    = HttpError.raise(Status.methodNotAllowed(), msg)
-    pub def conflict(msg: String): a \ HttpError            = HttpError.raise(Status.conflict(), msg)
-    pub def unprocessable(msg: String): a \ HttpError       = HttpError.raise(Status.unprocessableEntity(), msg)
+    pub def conflict(msg: String): a \ HttpError             = HttpError.raise(Status.conflict(), msg)
+    pub def payloadTooLarge(msg: String): a \ HttpError      = HttpError.raise(Status.payloadTooLarge(), msg)
+    pub def unsupportedMediaType(msg: String): a \ HttpError = HttpError.raise(Status.unsupportedMediaType(), msg)
+    pub def unprocessable(msg: String): a \ HttpError        = HttpError.raise(Status.unprocessableEntity(), msg)
     pub def tooManyRequests(msg: String): a \ HttpError     = HttpError.raise(Status.tooManyRequests(), msg)
     pub def internalError(msg: String): a \ HttpError       = HttpError.raise(Status.internalServerError(), msg)
 

@@ -1,4 +1,5 @@
 pub mod Weft.Request {
+    use Weft.Body
     use Weft.Cookie
     use Weft.Headers
     use Weft.Method
@@ -14,10 +15,11 @@ pub mod Weft.Request {
             path     = String,
             rawQuery = String,
             queryMap = Map[String, String],
+            queryAll = Map[String, List[String]],
             params   = Map[String, String],
             headers  = Headers,
             cookies  = Map[String, String],
-            body     = String
+            body     = Body
         })
     }
 
@@ -29,6 +31,7 @@ pub mod Weft.Request {
             x#path == y#path and
             x#rawQuery == y#rawQuery and
             x#queryMap == y#queryMap and
+            x#queryAll == y#queryAll and
             x#params == y#params and
             x#headers == y#headers and
             x#cookies == y#cookies and
@@ -45,15 +48,18 @@ pub mod Weft.Request {
             case None =>
                 (rawPath, "")
         };
+        let parsedAll = Url.parseQueryAll(rawQ);
+        let parsedSingle = Map.map(vs -> Option.getWithDefault("", List.last(vs)), parsedAll);
         Request.Request({
             method   = m,
             path     = if (String.isEmpty(pathPart)) "/" else pathPart,
             rawQuery = rawQ,
-            queryMap = Url.parseQuery(rawQ),
+            queryMap = parsedSingle,
+            queryAll = parsedAll,
             params   = Map.empty(),
             headers  = Headers.empty(),
             cookies  = Map.empty(),
-            body     = ""
+            body     = Body.empty()
         })
 
     pub def get(p: String): Request    = make(Method.Get, p)
@@ -64,26 +70,61 @@ pub mod Weft.Request {
     pub def head(p: String): Request   = make(Method.Head, p)
     pub def options(p: String): Request = make(Method.Options, p)
 
-    pub def method(req: Request): Method               = let Request.Request(r) = req; r#method
-    pub def path(req: Request): String                 = let Request.Request(r) = req; r#path
-    pub def rawQuery(req: Request): String             = let Request.Request(r) = req; r#rawQuery
-    pub def queryParams(req: Request): Map[String, String] = let Request.Request(r) = req; r#queryMap
-    pub def params(req: Request): Map[String, String]  = let Request.Request(r) = req; r#params
-    pub def headers(req: Request): Headers             = let Request.Request(r) = req; r#headers
-    pub def cookies(req: Request): Map[String, String] = let Request.Request(r) = req; r#cookies
-    pub def body(req: Request): String                 = let Request.Request(r) = req; r#body
+    pub def method(req: Request): Method                          = let Request.Request(r) = req; r#method
+    pub def path(req: Request): String                            = let Request.Request(r) = req; r#path
+    pub def rawQuery(req: Request): String                        = let Request.Request(r) = req; r#rawQuery
+    pub def queryParams(req: Request): Map[String, String]        = let Request.Request(r) = req; r#queryMap
+    pub def queryParamsAll(req: Request): Map[String, List[String]] = let Request.Request(r) = req; r#queryAll
+    pub def params(req: Request): Map[String, String]             = let Request.Request(r) = req; r#params
+    pub def headers(req: Request): Headers                        = let Request.Request(r) = req; r#headers
+    pub def cookies(req: Request): Map[String, String]            = let Request.Request(r) = req; r#cookies
+    pub def bodyValue(req: Request): Body                         = let Request.Request(r) = req; r#body
+    pub def body(req: Request): String                            = Body.asText(bodyValue(req))
+    pub def bodyBytes(req: Request): Vector[Int8]                 = Body.asBytes(bodyValue(req))
+    pub def bodyLength(req: Request): Int32                       = Body.byteLength(bodyValue(req))
 
     pub def header(name: String, req: Request): Option[String] =
         Headers.get(name, headers(req))
 
+    ///
+    /// Returns the lowercased media type from the `Content-Type` header (without parameters
+    /// such as `; charset=utf-8` or `; boundary=...`), if present.
+    ///
+    pub def contentType(req: Request): Option[String] =
+        header("Content-Type", req) |> Option.map(ct -> {
+            let media = match String.indexOfLeft({substr = ";"}, ct) {
+                case Some(idx) => String.sliceLeft({end = idx}, ct)
+                case None      => ct
+            };
+            String.toLowerCase(String.trim(media))
+        })
+
     pub def queryParam(name: String, req: Request): Option[String] =
         Map.get(name, queryParams(req))
+
+    ///
+    /// Returns all values for query parameter `name` in order (empty list if absent).
+    ///
+    pub def queryParamAll(name: String, req: Request): List[String] =
+        Map.getWithDefault(name, Nil, queryParamsAll(req))
 
     pub def param(name: String, req: Request): Option[String] =
         Map.get(name, params(req))
 
     pub def cookie(name: String, req: Request): Option[String] =
         Map.get(name, cookies(req))
+
+    ///
+    /// Parses the request body as `application/x-www-form-urlencoded` (last value wins).
+    ///
+    pub def formParams(req: Request): Map[String, String] =
+        Url.parseQuery(body(req))
+
+    ///
+    /// Parses the request body as `application/x-www-form-urlencoded`, preserving all values per key.
+    ///
+    pub def formParamsAll(req: Request): Map[String, List[String]] =
+        Url.parseQueryAll(body(req))
 
     ///
     /// Extracts a `Bearer <token>` credential from the `Authorization` header.
@@ -122,6 +163,14 @@ pub mod Weft.Request {
 
     pub def withBody(b: String, req: Request): Request =
         let Request.Request(r) = req;
+        Request.Request({ body = Body.text(b) | r })
+
+    pub def withBytes(bs: Vector[Int8], req: Request): Request =
+        let Request.Request(r) = req;
+        Request.Request({ body = Body.bytes(bs) | r })
+
+    pub def withBodyValue(b: Body, req: Request): Request =
+        let Request.Request(r) = req;
         Request.Request({ body = b | r })
 
     pub def withParams(ps: Map[String, String], req: Request): Request =
@@ -130,7 +179,24 @@ pub mod Weft.Request {
 
     pub def withQuery(k: String, v: String, req: Request): Request =
         let Request.Request(r) = req;
-        Request.Request({ queryMap = Map.insert(k, v, r#queryMap) | r })
+        Request.Request({
+            queryMap = Map.insert(k, v, r#queryMap),
+            queryAll = Map.insert(k, v :: Nil, r#queryAll)
+            | r
+        })
+
+    pub def withQueryAll(k: String, vs: List[String], req: Request): Request =
+        let Request.Request(r) = req;
+        let nextSingle = match List.last(vs) {
+            case Some(lastV) => Map.insert(k, lastV, r#queryMap)
+            case None        => Map.remove(k, r#queryMap)
+        };
+        let nextAll = if (List.isEmpty(vs)) Map.remove(k, r#queryAll) else Map.insert(k, vs, r#queryAll);
+        Request.Request({ queryMap = nextSingle, queryAll = nextAll | r })
+
+    pub def addQuery(k: String, v: String, req: Request): Request =
+        let existing = queryParamAll(k, req);
+        withQueryAll(k, List.append(existing, v :: Nil), req)
 
     pub def withCookie(name: String, value: String, req: Request): Request =
         let Request.Request(r) = req;

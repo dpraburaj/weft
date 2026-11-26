@@ -101,6 +101,31 @@ pub mod Weft.Middleware {
         checked_ecast(h())
     }
 
+    ///
+    /// Route middleware that rejects requests whose body exceeds `maxBytes` with
+    /// `413 Payload Too Large` via `HttpError`. Useful for tightening or customizing
+    /// per-subrouter body caps (e.g. 1 MiB for JSON routes, 20 MiB for uploads).
+    ///
+    pub def limitBodySize(maxBytes: Int32, h: Handler[ef]): Handler[ef + {Req, HttpError}] = () -> {
+        let len = Req.bodyLength();
+        if (len > maxBytes)
+            HttpError.payloadTooLarge("Request body size (${len} bytes) exceeds limit of ${maxBytes} bytes")
+        else
+            checked_ecast(h())
+    }
+
+    ///
+    /// App-level middleware that rejects requests whose body exceeds `maxBytes` with
+    /// `413 Payload Too Large` via `HttpError`. Place before `errorJson`/`errorHtml`.
+    ///
+    pub def maxBodySize(maxBytes: Int32, app: App[ef]): App[ef + HttpError] = req -> {
+        let len = Request.bodyLength(req);
+        if (len > maxBytes)
+            HttpError.payloadTooLarge("Request body size (${len} bytes) exceeds limit of ${maxBytes} bytes")
+        else
+            checked_ecast(app(req))
+    }
+
     // --- Cross-Cutting HTTP Middleware (Effectful via Flix stdlib `Logger` & `Clock`) ---
 
     ///
