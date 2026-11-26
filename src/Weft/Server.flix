@@ -38,7 +38,7 @@ pub mod Weft.Server {
         try {
             let addr = new InetSocketAddress(c#host, c#port);
             let srv = HttpServer.create(addr, c#backlog);
-            let _ctx = srv.createContext("/", makeHttpHandler(c#maxBodyBytes, app));
+            let _ctx = srv.createContext("/", makeHttpHandler(c#maxBodyBytes, c#exposeInternalErrors, app));
             srv.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
             srv.start();
             Ok(ServerHandle.ServerHandle(srv, c#host))
@@ -74,7 +74,7 @@ pub mod Weft.Server {
 
     // --- JDK HttpExchange <-> Weft Bridge ---
 
-    def makeHttpHandler(maxBodyBytes: Int32, app: App[IO]): HttpHandler \ IO =
+    def makeHttpHandler(maxBodyBytes: Int32, exposeInternalErrors: Bool, app: App[IO]): HttpHandler \ IO =
         new HttpHandler {
             def handle(_this: HttpHandler, exchange: HttpExchange): Unit \ IO =
                 try {
@@ -91,7 +91,11 @@ pub mod Weft.Server {
                 } catch {
                     case ex: Exception =>
                         try {
-                            let fallback = Response.text("Internal Server Error: ${ex.getMessage()}")
+                            let bodyMsg = if (exposeInternalErrors)
+                                "Internal Server Error: ${ex.getMessage()}"
+                            else
+                                "Internal Server Error";
+                            let fallback = Response.text(bodyMsg)
                                 |> Response.withStatus(Status.internalServerError());
                             let dummyReq = Request.get("/");
                             writeResponse(dummyReq, fallback, exchange)

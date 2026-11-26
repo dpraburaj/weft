@@ -88,6 +88,10 @@ pub mod Weft.Json {
                     case 9  => StringBuilder.appendString("\\t", sb)
                     case 8  => StringBuilder.appendString("\\b", sb)
                     case 12 => StringBuilder.appendString("\\f", sb)
+                    case _ if cp < 32 =>
+                        StringBuilder.appendString("\\u00", sb);
+                        StringBuilder.append(hexDigit(Int32.logicalRightShift({ dist = 4 }, cp)), sb);
+                        StringBuilder.append(hexDigit(Int32.bitwiseAnd(cp, 15)), sb)
                     case _  => StringBuilder.append(c, sb)
                 };
                 loop(i + 1)
@@ -95,6 +99,25 @@ pub mod Weft.Json {
         };
         loop(0);
         StringBuilder.toString(sb)
+    }
+
+    def hexDigit(n: Int32): Char = match n {
+        case 0  => '0'
+        case 1  => '1'
+        case 2  => '2'
+        case 3  => '3'
+        case 4  => '4'
+        case 5  => '5'
+        case 6  => '6'
+        case 7  => '7'
+        case 8  => '8'
+        case 9  => '9'
+        case 10 => 'a'
+        case 11 => 'b'
+        case 12 => 'c'
+        case 13 => 'd'
+        case 14 => 'e'
+        case _  => 'f'
     }
 
     // --- Pure Accessors ---
@@ -184,6 +207,30 @@ pub mod Weft.Json {
         }
 
     ///
+    /// Extracts a required 64-bit integer field, or raises `400 Bad Request`.
+    ///
+    pub def requireInt64(key: String, j: Json): Int64 \ HttpError =
+        match getField(key, j) {
+            case Some(v) => match asInt64(v) {
+                case Some(n) => n
+                case None    => HttpError.badRequest("Field '${key}' must be a 64-bit integer")
+            }
+            case None => HttpError.badRequest("Missing required field '${key}'")
+        }
+
+    ///
+    /// Extracts a required floating-point number field, or raises `400 Bad Request`.
+    ///
+    pub def requireFloat(key: String, j: Json): Float64 \ HttpError =
+        match getField(key, j) {
+            case Some(v) => match asFloat(v) {
+                case Some(f) => f
+                case None    => HttpError.badRequest("Field '${key}' must be a number")
+            }
+            case None => HttpError.badRequest("Missing required field '${key}'")
+        }
+
+    ///
     /// Extracts a required boolean field, or raises `400 Bad Request`.
     ///
     pub def requireBool(key: String, j: Json): Bool \ HttpError =
@@ -191,6 +238,26 @@ pub mod Weft.Json {
             case Some(Json.JBool(b)) => b
             case Some(_)             => HttpError.badRequest("Field '${key}' must be a boolean")
             case None                => HttpError.badRequest("Missing required field '${key}'")
+        }
+
+    ///
+    /// Extracts a required JSON array field, or raises `400 Bad Request`.
+    ///
+    pub def requireArray(key: String, j: Json): List[Json] \ HttpError =
+        match getField(key, j) {
+            case Some(Json.JArray(xs)) => xs
+            case Some(_)               => HttpError.badRequest("Field '${key}' must be an array")
+            case None                  => HttpError.badRequest("Missing required field '${key}'")
+        }
+
+    ///
+    /// Extracts a required JSON object field, or raises `400 Bad Request`.
+    ///
+    pub def requireObject(key: String, j: Json): Map[String, Json] \ HttpError =
+        match getField(key, j) {
+            case Some(Json.JObject(m)) => m
+            case Some(_)               => HttpError.badRequest("Field '${key}' must be an object")
+            case None                  => HttpError.badRequest("Missing required field '${key}'")
         }
 
     ///
@@ -205,6 +272,45 @@ pub mod Weft.Json {
         }
 
     ///
+    /// Extracts an optional 32-bit integer field (raises `400 Bad Request` if present with wrong type).
+    ///
+    pub def optionalInt(key: String, j: Json): Option[Int32] \ HttpError =
+        match getField(key, j) {
+            case None             => None
+            case Some(Json.JNull) => None
+            case Some(v) => match asInt(v) {
+                case Some(n) => Some(n)
+                case None    => HttpError.badRequest("Field '${key}' must be an integer")
+            }
+        }
+
+    ///
+    /// Extracts an optional 64-bit integer field (raises `400 Bad Request` if present with wrong type).
+    ///
+    pub def optionalInt64(key: String, j: Json): Option[Int64] \ HttpError =
+        match getField(key, j) {
+            case None             => None
+            case Some(Json.JNull) => None
+            case Some(v) => match asInt64(v) {
+                case Some(n) => Some(n)
+                case None    => HttpError.badRequest("Field '${key}' must be a 64-bit integer")
+            }
+        }
+
+    ///
+    /// Extracts an optional floating-point field (raises `400 Bad Request` if present with wrong type).
+    ///
+    pub def optionalFloat(key: String, j: Json): Option[Float64] \ HttpError =
+        match getField(key, j) {
+            case None             => None
+            case Some(Json.JNull) => None
+            case Some(v) => match asFloat(v) {
+                case Some(f) => Some(f)
+                case None    => HttpError.badRequest("Field '${key}' must be a number")
+            }
+        }
+
+    ///
     /// Extracts an optional boolean field (raises `400 Bad Request` if present with wrong type).
     ///
     pub def optionalBool(key: String, j: Json): Option[Bool] \ HttpError =
@@ -213,6 +319,28 @@ pub mod Weft.Json {
             case Some(Json.JNull)    => None
             case Some(Json.JBool(b)) => Some(b)
             case Some(_)             => HttpError.badRequest("Field '${key}' must be a boolean")
+        }
+
+    ///
+    /// Extracts an optional JSON array field (raises `400 Bad Request` if present with wrong type).
+    ///
+    pub def optionalArray(key: String, j: Json): Option[List[Json]] \ HttpError =
+        match getField(key, j) {
+            case None                  => None
+            case Some(Json.JNull)      => None
+            case Some(Json.JArray(xs)) => Some(xs)
+            case Some(_)               => HttpError.badRequest("Field '${key}' must be an array")
+        }
+
+    ///
+    /// Extracts an optional JSON object field (raises `400 Bad Request` if present with wrong type).
+    ///
+    pub def optionalObject(key: String, j: Json): Option[Map[String, Json]] \ HttpError =
+        match getField(key, j) {
+            case None                  => None
+            case Some(Json.JNull)      => None
+            case Some(Json.JObject(m)) => Some(m)
+            case Some(_)               => HttpError.badRequest("Field '${key}' must be an object")
         }
 
     // --- Recursive-Descent Parser (RFC 8259) ---

@@ -65,6 +65,11 @@ pub mod Weft.Row {
         case _                          => None
     }
 
+    pub def getBlob(col: String, row: Row): Option[Vector[Int8]] = match get(col, row) {
+        case Some(SqlValue.SqlBlob(bs)) => Some(bs)
+        case _                          => None
+    }
+
     // --- Effectful Extractors (`DbError`) ---
 
     pub def requireInt(col: String, row: Row): Int32 \ DbError =
@@ -97,6 +102,12 @@ pub mod Weft.Row {
             case None    => DbError.raise(DbErrorKind.ColumnDecodeError, "Expected Bool in column '${col}'")
         }
 
+    pub def requireBlob(col: String, row: Row): Vector[Int8] \ DbError =
+        match getBlob(col, row) {
+            case Some(v) => v
+            case None    => DbError.raise(DbErrorKind.ColumnDecodeError, "Expected Blob in column '${col}'")
+        }
+
     pub def optionalString(col: String, row: Row): Option[String] \ DbError =
         match get(col, row) {
             case None                      => None
@@ -115,6 +126,45 @@ pub mod Weft.Row {
                 case None    => DbError.raise(DbErrorKind.ColumnDecodeError, "Int64 overflow in column '${col}'")
             }
             case Some(_) => DbError.raise(DbErrorKind.ColumnDecodeError, "Expected nullable Int32 in column '${col}'")
+        }
+
+    pub def optionalInt64(col: String, row: Row): Option[Int64] \ DbError =
+        match get(col, row) {
+            case None                       => None
+            case Some(SqlValue.SqlNull)     => None
+            case Some(SqlValue.SqlInt64(i)) => Some(i)
+            case Some(SqlValue.SqlInt(i))   => Some(Int32.toInt64(i))
+            case Some(_)                    => DbError.raise(DbErrorKind.ColumnDecodeError, "Expected nullable Int64 in column '${col}'")
+        }
+
+    pub def optionalFloat(col: String, row: Row): Option[Float64] \ DbError =
+        match get(col, row) {
+            case None                       => None
+            case Some(SqlValue.SqlNull)     => None
+            case Some(SqlValue.SqlFloat(f)) => Some(f)
+            case Some(SqlValue.SqlInt(i))   => Some(Int32.toFloat64(i))
+            case Some(SqlValue.SqlInt64(i)) => Some(Int64.toFloat64(i))
+            case Some(_)                    => DbError.raise(DbErrorKind.ColumnDecodeError, "Expected nullable Float64 in column '${col}'")
+        }
+
+    pub def optionalBool(col: String, row: Row): Option[Bool] \ DbError =
+        match get(col, row) {
+            case None                          => None
+            case Some(SqlValue.SqlNull)        => None
+            case Some(SqlValue.SqlBool(b))     => Some(b)
+            case Some(SqlValue.SqlInt(0))      => Some(false)
+            case Some(SqlValue.SqlInt(1))      => Some(true)
+            case Some(SqlValue.SqlInt64(0i64)) => Some(false)
+            case Some(SqlValue.SqlInt64(1i64)) => Some(true)
+            case Some(_)                       => DbError.raise(DbErrorKind.ColumnDecodeError, "Expected nullable Bool in column '${col}'")
+        }
+
+    pub def optionalBlob(col: String, row: Row): Option[Vector[Int8]] \ DbError =
+        match get(col, row) {
+            case None                       => None
+            case Some(SqlValue.SqlNull)     => None
+            case Some(SqlValue.SqlBlob(bs)) => Some(bs)
+            case Some(_)                    => DbError.raise(DbErrorKind.ColumnDecodeError, "Expected nullable Blob in column '${col}'")
         }
 
 }

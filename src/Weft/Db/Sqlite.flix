@@ -235,6 +235,7 @@ pub mod Weft.Db.Sqlite {
                     case SqlValue.SqlFloat(f) => ps.setDouble(idx, f)
                     case SqlValue.SqlText(s)  => ps.setString(idx, s)
                     case SqlValue.SqlBool(b)  => ps.setInt(idx, if (b) 1 else 0)
+                    case SqlValue.SqlBlob(bs) => ps.setBytes(idx, Vector.toArray(Static, bs))
                 };
                 loop(idx + 1, tl)
         };
@@ -269,6 +270,7 @@ pub mod Weft.Db.Sqlite {
                         case "java.lang.Double"  => SqlValue.SqlFloat(rs.getDouble(idx))
                         case "java.lang.Float"   => SqlValue.SqlFloat(rs.getDouble(idx))
                         case "java.lang.Boolean" => SqlValue.SqlBool(rs.getBoolean(idx))
+                        case "[B"                => SqlValue.SqlBlob(Array.toVector(rs.getBytes(idx)))
                         case _                   => SqlValue.SqlText(rs.getString(idx))
                     };
                 loopCols(idx + 1, (colName, sqlVal) :: acc)

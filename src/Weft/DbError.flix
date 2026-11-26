@@ -47,4 +47,23 @@ pub mod Weft.DbError {
             }
         }
 
+    ///
+    /// Production-safe version of `runToHttpError`: logs the underlying database error
+    /// via Flix's `Logger` effect and raises a redacted `HttpError` without leaking
+    /// internal schema or SQLite/SQL messages to HTTP clients.
+    ///
+    pub def runToHttpErrorSafe(f: Unit -> a \ ef): a \ (ef - DbError) + {HttpError, Logger} =
+        run {
+            f()
+        } with handler DbError {
+            def raise(kind, msg, _k) = match kind {
+                case DbErrorKind.ConstraintViolation =>
+                    Logger.warn("Database constraint violation: ${msg}");
+                    HttpError.conflict("A resource conflict occurred")
+                case _ =>
+                    Logger.fatal("Database error (${kind}): ${msg}");
+                    HttpError.internalError("Internal database error")
+            }
+        }
+
 }

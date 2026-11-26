@@ -30,6 +30,10 @@ pub mod Weft.Req {
     pub def headers(): Headers \ Req                           = Request.headers(Req.request())
     pub def header(name: String): Option[String] \ Req         = Request.header(name, Req.request())
     pub def contentType(): Option[String] \ Req                = Request.contentType(Req.request())
+    pub def prefersHtml(): Bool \ Req                          = Weft.Accept.prefersHtml(Req.request())
+    pub def prefersJson(): Bool \ Req                          = Weft.Accept.prefersJson(Req.request())
+    pub def negotiate(offered: List[String]): Option[String] \ Req =
+        Weft.Accept.negotiate(offered, header("Accept"))
     pub def queryParams(): Map[String, String] \ Req           = Request.queryParams(Req.request())
     pub def queryParamsAll(): Map[String, List[String]] \ Req  = Request.queryParamsAll(Req.request())
     pub def queryParam(name: String): Option[String] \ Req     = Request.queryParam(name, Req.request())
@@ -76,6 +80,15 @@ pub mod Weft.Req {
             case Some(raw) =>
                 let n = Int32.fromString(raw)
                     |> HttpError.orBadRequest("Query parameter '${name}' must be an integer, got '${raw}'");
+                Some(n)
+        }
+
+    pub def optionalInt64Query(name: String): Option[Int64] \ {Req, HttpError} =
+        match queryParam(name) {
+            case None      => None
+            case Some(raw) =>
+                let n = Int64.fromString(raw)
+                    |> HttpError.orBadRequest("Query parameter '${name}' must be a 64-bit integer, got '${raw}'");
                 Some(n)
         }
 
@@ -132,6 +145,31 @@ pub mod Weft.Req {
         let raw = requireFormField(name);
         Int32.fromString(raw)
             |> HttpError.orBadRequest("Form field '${name}' must be an integer, got '${raw}'")
+
+    pub def requireInt64FormField(name: String): Int64 \ {Req, HttpError} =
+        let raw = requireFormField(name);
+        Int64.fromString(raw)
+            |> HttpError.orBadRequest("Form field '${name}' must be a 64-bit integer, got '${raw}'")
+
+    pub def optionalIntFormField(name: String): Option[Int32] \ {Req, HttpError} =
+        match optionalFormField(name) {
+            case None => None
+            case Some(raw) if String.isEmpty(String.trim(raw)) => None
+            case Some(raw) =>
+                let n = Int32.fromString(String.trim(raw))
+                    |> HttpError.orBadRequest("Form field '${name}' must be an integer, got '${raw}'");
+                Some(n)
+        }
+
+    pub def optionalInt64FormField(name: String): Option[Int64] \ {Req, HttpError} =
+        match optionalFormField(name) {
+            case None => None
+            case Some(raw) if String.isEmpty(String.trim(raw)) => None
+            case Some(raw) =>
+                let n = Int64.fromString(String.trim(raw))
+                    |> HttpError.orBadRequest("Form field '${name}' must be a 64-bit integer, got '${raw}'");
+                Some(n)
+        }
 
     // --- Multipart Form Extractor (`multipart/form-data`) ---
 

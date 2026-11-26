@@ -1,4 +1,5 @@
 pub mod Weft.Middleware {
+    use Weft.Accept
     use Weft.App
     use Weft.Auth
     use Weft.CorsConfig
@@ -6,6 +7,8 @@ pub mod Weft.Middleware {
     use Weft.CsrfConfig
     use Weft.DbError
     use Weft.Handler
+    use Weft.Html
+    use Weft.HtmlDoc
     use Weft.HttpError
     use Weft.Json
     use Weft.Method
@@ -19,6 +22,8 @@ pub mod Weft.Middleware {
     use Weft.SessionConfig
     use Weft.SessionStore
     use Weft.Status
+    use Weft.ValidationError
+    use Weft.ValidationErrors
     use Time.Clock
 
     // --- Effect-Discharging App Middleware ---
@@ -56,6 +61,73 @@ pub mod Weft.Middleware {
         } with HttpError.runWith(render)
 
     ///
+    /// Discharges `HttpError` using HTTP `Accept` content negotiation:
+    /// renders HTML error pages for browser requests (`Accept.prefersHtml`) and
+    /// structured JSON error payloads for API clients.
+    ///
+    pub def errorNegotiated(app: App[ef]): App[ef - HttpError] = req ->
+        if (Accept.prefersHtml(req))
+            run { app(req) } with HttpError.runAsHtml
+        else
+            run { app(req) } with HttpError.runAsJson
+
+    ///
+    /// Like `errorNegotiated`, using custom HTML and JSON error renderers (e.g. a branded
+    /// storefront error page for browsers and structured JSON for APIs).
+    ///
+    pub def errorNegotiatedWith(
+        renderHtml: (Status, String) -> Response \ ef2,
+        renderJson: (Status, String) -> Response \ ef2,
+        app: App[ef1]
+    ): App[(ef1 - HttpError) + ef2] = req ->
+        if (Accept.prefersHtml(req))
+            run { app(req) } with HttpError.runWith(renderHtml)
+        else
+            run { app(req) } with HttpError.runWith(renderJson)
+
+    ///
+    /// Route-level error middleware discharging `HttpError` as JSON on a specific sub-router
+    /// (e.g. `/api/*` always returns JSON errors while storefront routes return HTML).
+    ///
+    pub def routeErrorJson(h: Handler[ef]): Handler[ef - HttpError] = () ->
+        run { h() } with HttpError.runAsJson
+
+    ///
+    /// Route-level error middleware discharging `HttpError` as HTML on a specific sub-router.
+    ///
+    pub def routeErrorHtml(h: Handler[ef]): Handler[ef - HttpError] = () ->
+        run { h() } with HttpError.runAsHtml
+
+    ///
+    /// Route-level error middleware discharging `HttpError` with a custom renderer.
+    ///
+    pub def routeErrorWith(
+        render: (Status, String) -> Response \ ef2,
+        h: Handler[ef1]
+    ): Handler[(ef1 - HttpError) + ef2] = () ->
+        run { h() } with HttpError.runWith(render)
+
+    ///
+    /// Discharges `ValidationError` by rendering structured `422 Unprocessable Entity` JSON
+    /// responses containing `"errors": { "<field>": [...] }`.
+    ///
+    pub def validationErrorJson(app: App[ef]): App[ef - ValidationError] = req ->
+        run {
+            app(req)
+        } with ValidationError.runAsJson
+
+    ///
+    /// Discharges `ValidationError` with a custom `ValidationErrors -> Response` renderer.
+    ///
+    pub def validationErrorWith(
+        render: ValidationErrors -> Response \ ef2,
+        app: App[ef1]
+    ): App[(ef1 - ValidationError) + ef2] = req ->
+        run {
+            app(req)
+        } with ValidationError.runWith(render)
+
+    ///
     /// Discharges `DbError` by translating database errors into `HttpError`:
     /// - `ConstraintViolation` -> `409 Conflict`
     /// - other database failures -> `500 Internal Server Error`
@@ -67,6 +139,15 @@ pub mod Weft.Middleware {
         run {
             app(req)
         } with DbError.runToHttpError
+
+    ///
+    /// Production-safe `DbError` middleware: logs full DB details via `Logger` and returns
+    /// redacted `409` / `500` `HttpError` responses without leaking internal SQL/schema messages.
+    ///
+    pub def dbErrorToHttpSafe(app: App[ef]): App[(ef - DbError) + {HttpError, Logger}] = req ->
+        run {
+            app(req)
+        } with DbError.runToHttpErrorSafe
 
     ///
     /// Discharges Flix's standard `Abort` effect, converting any abort into a
@@ -83,6 +164,35 @@ pub mod Weft.Middleware {
                     Nil
                 );
                 Json.toResponseWithStatus(Status.internalServerError(), payload)
+        }
+
+    ///
+    /// Discharges Flix's standard `Abort` effect, logging the abort reason via `Logger`
+    /// and returning an `Accept`-negotiated redacted `500 Internal Server Error` response
+    /// (HTML for browsers, JSON for API clients).
+    ///
+    pub def recoverAbortNegotiated(app: App[ef]): App[(ef - Abort) + Logger] = req ->
+        match Abort.runWithResult(() -> app(req)) {
+            case Ok(res) => res
+            case Err(msg) =>
+                Logger.fatal("Request aborted on ${Request.method(req)} ${Request.path(req)}: ${RichString.toString(msg)}");
+                if (Accept.prefersHtml(req)) {
+                    let doc = Html.page("500 Internal Server Error", () ->
+                        Html.main_(() -> {
+                            Html.h1Text("500 Internal Server Error");
+                            Html.pText("An unexpected error occurred.")
+                        })
+                    );
+                    HtmlDoc.toResponseWithStatus(Status.internalServerError(), doc)
+                } else {
+                    let payload = Json.obj(
+                        ("status", Json.int(500)) ::
+                        ("reason", Json.str("Internal Server Error")) ::
+                        ("error",  Json.str("Internal Server Error")) ::
+                        Nil
+                    );
+                    Json.toResponseWithStatus(Status.internalServerError(), payload)
+                }
         }
 
     // --- Effect-Discharging Route Middleware (for `Router.withMiddleware`) ---
