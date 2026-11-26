@@ -4,4 +4,4 @@ repository = "github:dpraburaj/weft-example-sqlite-notes"
 flix       = "0.80.0"
 
 [dependencies]
-"github:dpraburaj/weft" = { version = "0.1.0", mount = "weft", security = "unrestricted" }
+"github:dpraburaj/weft" = { version = "0.2.0", mount = "weft", security = "unrestricted" }

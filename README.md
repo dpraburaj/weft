@@ -17,7 +17,7 @@ Or add it directly to your `flix.toml`:
 
 ```toml
 [dependencies]
-"github:dpraburaj/weft" = { version = "0.1.0", mount = "weft", security = "unrestricted" }
+"github:dpraburaj/weft" = { version = "0.2.0", mount = "weft", security = "unrestricted" }
 ```
 
 > `security = "unrestricted"` is required by Flix because Weft uses Java interop (`HttpServer`, virtual threads) and bundles `org.xerial:sqlite-jdbc`.
