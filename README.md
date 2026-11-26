@@ -17,8 +17,10 @@ Or add it directly to your `flix.toml`:
 
 ```toml
 [dependencies]
-"github:dpraburaj/weft" = { version = "0.1.0", mount = "weft" }
+"github:dpraburaj/weft" = { version = "0.1.0", mount = "weft", security = "unrestricted" }
 ```
+
+> `security = "unrestricted"` is required by Flix because Weft uses Java interop (`HttpServer`, virtual threads) and bundles `org.xerial:sqlite-jdbc`.
 
 Requires **Flix 0.80.0+** and **JDK 21+**.
 
@@ -170,6 +172,21 @@ let handle = JobWorker.startBackground(WorkerConfig.default(), () -> ...);
 - `Weft.{Job,JobSpec,JobStatus,JobError,JobQueue,JobStore,JobBackend,JobRegistry,JobWorker,WorkerConfig,WorkerHandle,InMemoryJobStore}` — Background job runner
 - `Weft.{Server,ServerConfig,ServerHandle}` — JDK 21 virtual-thread HTTP/1.1 server
 - `Weft.{TestClient,TestEffects}` — In-memory `TestClient` and deterministic pure `TestEffects` (`Logger`, `Time.Clock`)
+
+## Examples
+
+Complete, runnable Flix projects live in [`examples/`](examples/README.md):
+
+- [`examples/hello-world`](examples/hello-world/) — Routing, JSON validation, ambient `Res` cookies/headers, middleware, and pure `TestClient` tests
+- [`examples/custom-effects`](examples/custom-effects/) — Custom domain effects (`BookmarkStore`, `Notifier`), Bearer auth + RBAC, and zero-IO pure HTTP tests
+- [`examples/sqlite-notes`](examples/sqlite-notes/) — Persistent SQLite REST API, migrations, `Db.transactionHttp` atomic batch rollback, and `409 Conflict` mapping
+- [`examples/background-jobs`](examples/background-jobs/) — HTTP API + Java 21 virtual-thread `JobWorker`, delayed jobs, exponential backoff retries, and deterministic clock-driven tests
+
+```bash
+cd examples/hello-world
+flix test   # run tests
+flix run    # start server on http://127.0.0.1:8080
+```
 
 ## Development
 
