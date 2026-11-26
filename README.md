@@ -1,5 +1,8 @@
 # Weft
 
+> [!WARNING]
+> **Early Alpha / Experimental Playground:** Weft is an alpha play framework for exploring web development with algebraic effects in Flix. APIs will break without notice, edge cases are still being ironed out, and it is **not intended for production use**.
+
 An idiomatic, lightweight web framework for **Flix (0.80.0)** built from the ground up around **algebraic effects**, **effect polymorphism**, and **Java 21 virtual threads**.
 
 ## Installation
