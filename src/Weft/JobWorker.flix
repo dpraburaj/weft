@@ -83,6 +83,17 @@ pub mod Weft.JobWorker {
         loop(0)
 
     ///
+    /// Reclaims any jobs stuck in `Running` for longer than `leaseTimeoutMs` milliseconds
+    /// (e.g. after a worker crash), resetting them to `Pending` (or `Dead` if max attempts
+    /// were exhausted). Returns the number of reclaimed jobs.
+    ///
+    pub def reclaimStale(leaseTimeoutMs: Int64): Int32 \ {JobStore, Clock} = {
+        let now = Clock.now();
+        let staleBefore = now - Int64.max(0i64, leaseTimeoutMs);
+        JobStore.reclaimStale(staleBefore, now)
+    }
+
+    ///
     /// Starts `cfg#concurrency` background Java 21 virtual threads that continuously
     /// invoke `runOnce()` (typically `() -> run { JobWorker.runNext(cfg, reg) } with ...`).
     ///

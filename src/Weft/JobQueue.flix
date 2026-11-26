@@ -1,4 +1,6 @@
 pub mod Weft.JobQueue {
+    use Weft.Db
+    use Weft.DbError
     use Weft.Job
     use Weft.JobQueue
     use Weft.JobSpec
@@ -32,6 +34,13 @@ pub mod Weft.JobQueue {
         JobQueue.enqueue(JobSpec.make(kind, payload) |> JobSpec.withQueue(queue))
 
     ///
+    /// Enqueues an idempotent job keyed by `uniqueKey` on the `"default"` queue.
+    /// If a `Pending` or `Running` job with the same `uniqueKey` already exists, returns it.
+    ///
+    pub def dispatchUnique(uniqueKey: String, kind: String, payload: Json): Job \ JobQueue =
+        JobQueue.enqueue(JobSpec.make(kind, payload) |> JobSpec.withUniqueKey(uniqueKey))
+
+    ///
     /// Handles `JobQueue` by persisting into `JobStore` stamped with `Clock.now()`.
     ///
     pub def runWithStore(f: Unit -> a \ ef): a \ (ef - JobQueue) + {JobStore, Clock} =
@@ -44,5 +53,15 @@ pub mod Weft.JobQueue {
                 k(job)
             }
         }
+
+    ///
+    /// Transactional outbox handler: discharges `JobQueue` directly through the caller's
+    /// active `Db` effect so `JobQueue.dispatch` inside `Db.transaction` / `Db.transactionHttp`
+    /// commits or rolls back atomically with your domain writes!
+    ///
+    pub def runWithDb(f: Unit -> a \ ef): a \ (ef - JobQueue) + {Db, DbError, Clock} =
+        run {
+            runWithStore(f)
+        } with JobStore.runWithDb
 
 }

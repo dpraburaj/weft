@@ -17,7 +17,7 @@ Or add it directly to your `flix.toml`:
 
 ```toml
 [dependencies]
-"github:dpraburaj/weft" = { version = "0.5.0", mount = "weft", security = "unrestricted" }
+"github:dpraburaj/weft" = { version = "0.6.0", mount = "weft", security = "unrestricted" }
 ```
 
 > `security = "unrestricted"` is required by Flix because Weft uses Java interop (`HttpServer`, virtual threads) and bundles `org.xerial:sqlite-jdbc`.
@@ -78,6 +78,7 @@ Instead of threading a mutable `Context` god-object or nesting monad-transformer
 | `Weft.Db` & `Weft.DbError` | Driver-agnostic relational SQL effect (parameterized queries, transactions, migrations) & structured DB error effect | Handled by `Sqlite.runWith(db)` (or pure `Db.runMock`) and `Middleware.dbErrorToHttp` (`ConstraintViolation` -> `409 Conflict`) |
 | `Weft.JobQueue`, `JobStore` & `JobError` | Algebraic-effect background job producer, pluggable storage backend, and retry/dead-letter failure effect | Handled purely via `JobStore.runPure` in tests, or switched between `JobBackend.inMemory()` and `JobBackend.sqlite(db)` in production |
 | `Weft.StaticStore` | Algebraic-effect static asset store powering `StaticFiles.routes` (MIME detection, `ETag`/`304`, traversal & dotfile protection) | Handled purely via `StaticStore.runPure` in tests, or `StaticStore.runFromDir(dir)` in production |
+| `Weft.HttpClient` & `Env` | Outbound HTTP client effect (Stripe, email, webhooks) and typed environment/config effect (`.env` parsing + `Validate` startup checks) | Handled purely via `HttpClient.runMock`/`runRecording` & `Env.runWithMap` in tests, or `HttpClient.runWithJdk` & `Env.runWithSystem` in production |
 | `Logger`, `Clock`, `Abort` | Standard Flix library effects used natively by middleware (`requestLogger`, `timingHeader`, `recoverAbort`) | Swapped seamlessly between `IO` in production and 100% pure deterministic handlers in tests |
 | Your domain effects | e.g., `UserRepo`, `Mailer`, `PaymentGateway` | Compile-time verified: `Server.serve` won't compile until every custom effect is handled |
 
@@ -178,8 +179,9 @@ let handle = JobWorker.startBackground(WorkerConfig.default(), () -> ...);
 - `Weft.{Session,SessionConfig,SessionData,SessionStore,InMemorySessionStore}` — Signed cookie sessions with flash messages, session rotation (`Auth.loginSession`), and Pure / InMemory / SQLite storage backends
 - `Weft.Router` — Effect-polymorphic `Router[ef]` (`:param`, `*wildcard`, `scope`, `merge`, `withMiddleware`, `HEAD` fallback, `405` + `Allow`)
 - `Weft.{CorsConfig,Middleware}` — `errorJson`, `errorText`, `errorHtml`, `errorWith`, `errorNegotiated`, `errorNegotiatedWith`, `routeErrorJson`, `routeErrorHtml`, `validationErrorJson`, `dbErrorToHttp`, `dbErrorToHttpSafe`, `recoverAbort`, `recoverAbortNegotiated`, `session`, `bearerAuth`, `sessionAuth`, `sessionAuthOrRedirect`, `optionalSessionAuth`, `optionalBearerAuth`, `requireRole`, `csrf`, `csrfApp`, `maxBodySize`, `limitBodySize`, `requestLogger`, `timingHeader`, `cors`, `securityHeaders`
-- `Weft.{Db,DbError,DbErrorKind,SqlValue,Row,Migration}` & `Weft.Db.{Sqlite,SqliteConfig,SqliteDb}` — Driver-agnostic SQL effects + thread-safe SQLite backend
-- `Weft.{Job,JobSpec,JobStatus,JobError,JobQueue,JobStore,JobBackend,JobRegistry,JobWorker,WorkerConfig,WorkerHandle,InMemoryJobStore}` — Background job runner
+- `Weft.{Db,DbError,DbErrorKind,SqlValue,Row,Migration,SqlBuilder,Page}` & `Weft.Db.{Sqlite,SqliteConfig,SqliteDb}` — Driver-agnostic SQL effects, nested savepoints, trigger-safe migrations, dynamic `SqlBuilder` (`IN`, `WHERE`, pagination), and SQLite backend
+- `Weft.{Job,JobSpec,JobStatus,JobError,JobQueue,JobStore,JobBackend,JobRegistry,JobWorker,WorkerConfig,WorkerHandle,InMemoryJobStore}` — Background job runner with `uniqueKey` deduplication, stale-job recovery (`reclaimStale`), and transactional outbox (`JobQueue.runWithDb`)
+- `Weft.{HttpClient,ClientRequest,ClientResponse,Env}` — Outbound JDK 21 `HttpClient` effect (with pure `runMock`/`runRecording`) and typed `Env` / `.env` config effect
 - `Weft.{Server,ServerConfig,ServerHandle}` — JDK 21 virtual-thread HTTP/1.1 server with binary streaming and configurable `maxBodyBytes` cap (`413 Payload Too Large`)
 - `Weft.{TestClient,TestEffects}` — In-memory `TestClient` (`get`, `postJson`, `postForm`, `postBytes`, `postMultipart`) and deterministic pure `TestEffects` (`Logger`, `Time.Clock`)
 

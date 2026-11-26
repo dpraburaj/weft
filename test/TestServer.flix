@@ -5,6 +5,8 @@ mod TestServer {
     use Weft.App
     use Weft.Auth
     use Weft.Body
+    use Weft.ClientRequest
+    use Weft.ClientResponse
     use Weft.Json
     use Weft.Middleware
     use Weft.Multipart
@@ -179,6 +181,22 @@ mod TestServer {
                     let bigReq = g1.method("POST", HttpRequest$BodyPublishers.ofByteArray(bigArr)).build();
                     let bigResp = client.send(bigReq, strHandler);
                     assertEq(expected = 413, bigResp.statusCode());
+
+                    // 4. Weft.HttpClient.runWithJdk talks cleanly to the live server (binary round-trip)
+                    let clientOutcome = Weft.HttpClient.runWithJdk(() ->
+                        Weft.HttpClient.send(
+                            ClientRequest.post("${baseUrl}/binary")
+                                |> ClientRequest.withHeader("Content-Type", "application/octet-stream")
+                                |> ClientRequest.withBytes(rawVec)
+                        )
+                    );
+                    match clientOutcome {
+                        case Ok(cResp) =>
+                            assertEq(expected = 200, ClientResponse.status(cResp));
+                            assertEq(expected = rawVec, ClientResponse.bodyBytes(cResp))
+                        case Err(e) =>
+                            Assert.fail("Weft.HttpClient.runWithJdk failed: ${e}")
+                    };
                     Ok(())
                 } catch {
                     case ex: Exception => Err(ex.getMessage())

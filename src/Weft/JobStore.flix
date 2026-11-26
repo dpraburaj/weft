@@ -25,6 +25,7 @@ pub mod Weft.JobStore {
         def markCompleted(id: Int64, nowMs: Int64): Unit
         def markRetry(id: Int64, nextRunAtMs: Int64, error: String, nowMs: Int64): Unit
         def markDead(id: Int64, error: String, nowMs: Int64): Unit
+        def reclaimStale(staleBeforeMs: Int64, nowMs: Int64): Int32
         def findJob(id: Int64): Option[Job]
         def listJobs(queue: Option[String], status: Option[JobStatus]): List[Job]
     }
@@ -43,11 +44,17 @@ pub mod Weft.JobStore {
                 f()
             } with handler JobStore {
                 def insertJob(spec, nowMs, k) = {
-                    let id = Ref.get(nextId);
-                    Ref.put(id + 1i64, nextId);
-                    let job = buildNewJob(id, spec, nowMs);
-                    Ref.transform(m -> Map.insert(id, job, m), jobs);
-                    k(job)
+                    let current = Ref.get(jobs);
+                    match findActiveByUniqueKey(JobSpec.uniqueKey(spec), Map.valuesOf(current)) {
+                        case Some(existing) =>
+                            k(existing)
+                        case None =>
+                            let id = Ref.get(nextId);
+                            Ref.put(id + 1i64, nextId);
+                            let job = buildNewJob(id, spec, nowMs);
+                            Ref.put(Map.insert(id, job, current), jobs);
+                            k(job)
+                    }
                 }
                 def claimNext(queue, nowMs, k) = {
                     let m = Ref.get(jobs);
@@ -70,6 +77,11 @@ pub mod Weft.JobStore {
                 def markDead(id, err, nowMs, k) = {
                     Ref.transform(m -> updateJobInMap(id, j -> transitionDead(j, err, nowMs), m), jobs);
                     k()
+                }
+                def reclaimStale(staleBeforeMs, nowMs, k) = {
+                    let (nextMap, count) = reclaimStaleInMap(staleBeforeMs, nowMs, Ref.get(jobs));
+                    Ref.put(nextMap, jobs);
+                    k(count)
                 }
                 def findJob(id, k) =
                     k(Map.get(id, Ref.get(jobs)))
@@ -114,11 +126,16 @@ pub mod Weft.JobStore {
         } with handler JobStore {
             def insertJob(spec, nowMs, k) = {
                 let job = withLock(lock, () -> {
-                    let id = Ref.get(nextId);
-                    Ref.put(id + 1i64, nextId);
-                    let j = buildNewJob(id, spec, nowMs);
-                    Ref.transform(m -> Map.insert(id, j, m), jobs);
-                    j
+                    let current = Ref.get(jobs);
+                    match findActiveByUniqueKey(JobSpec.uniqueKey(spec), Map.valuesOf(current)) {
+                        case Some(existing) => existing
+                        case None =>
+                            let id = Ref.get(nextId);
+                            Ref.put(id + 1i64, nextId);
+                            let j = buildNewJob(id, spec, nowMs);
+                            Ref.put(Map.insert(id, j, current), jobs);
+                            j
+                    }
                 });
                 k(job)
             }
@@ -153,6 +170,14 @@ pub mod Weft.JobStore {
                 );
                 k()
             }
+            def reclaimStale(staleBeforeMs, nowMs, k) = {
+                let count = withLock(lock, () -> {
+                    let (nextMap, n) = reclaimStaleInMap(staleBeforeMs, nowMs, Ref.get(jobs));
+                    Ref.put(nextMap, jobs);
+                    n
+                });
+                k(count)
+            }
             def findJob(id, k) = {
                 let opt = withLock(lock, () -> Map.get(id, Ref.get(jobs)));
                 k(opt)
@@ -165,8 +190,11 @@ pub mod Weft.JobStore {
 
     // --- 3. Driver-Agnostic SQL Backend (Works with SQLite & Future DBs!) ---
 
+    def selectCols(): String =
+        "SELECT id, queue, kind, payload, status, attempts, max_attempts, run_at_ms, last_error, unique_key, created_at_ms, updated_at_ms FROM _weft_jobs"
+
     ///
-    /// Schema migration creating the `_weft_jobs` table and due-job index.
+    /// Schema migrations creating the `_weft_jobs` table, due-job index, and `unique_key` index.
     /// Run via `Migration.runAll(JobStore.migrations())` (or `JobStore.initSchema()`).
     ///
     pub def migrations(): List[Migration] =
@@ -186,10 +214,17 @@ pub mod Weft.JobStore {
             "created_at_ms INTEGER NOT NULL, " +
             "updated_at_ms INTEGER NOT NULL);" +
             "CREATE INDEX IF NOT EXISTS idx_weft_jobs_due ON _weft_jobs (queue, status, run_at_ms, id)"
-        ) :: Nil
+        ) ::
+        Migration.make(
+            1003,
+            "add_weft_jobs_unique_key",
+            "ALTER TABLE _weft_jobs ADD COLUMN unique_key TEXT;" +
+            "CREATE INDEX IF NOT EXISTS idx_weft_jobs_unique_key ON _weft_jobs (unique_key, status)"
+        ) ::
+        Nil
 
     ///
-    /// Applies the `_weft_jobs` schema migration idempotently.
+    /// Applies the `_weft_jobs` schema migrations idempotently.
     ///
     pub def initSchema(): Unit \ {Db, DbError} = {
         let _ = Migration.runAll(migrations());
@@ -198,36 +233,52 @@ pub mod Weft.JobStore {
 
     ///
     /// Handles `JobStore` using the driver-agnostic `Db` effect (e.g. `Sqlite.runWith(db)`).
-    /// `claimNext` executes atomically inside `Db.transaction` so concurrent workers
-    /// never claim the same job twice!
+    /// `claimNext` and `reclaimStale` execute atomically inside `Db.transaction` (using
+    /// savepoints when nested inside an outer transaction).
     ///
     pub def runWithDb(f: Unit -> a \ ef): a \ (ef - JobStore) + {Db, DbError} =
         run {
             f()
         } with handler JobStore {
             def insertJob(spec, nowMs, k) = {
-                let runAt = nowMs + JobSpec.delayMs(spec);
-                let payloadStr = Json.encode(JobSpec.payload(spec));
-                let id = Db.insertAndGetId(
-                    "INSERT INTO _weft_jobs (queue, kind, payload, status, attempts, max_attempts, run_at_ms, last_error, created_at_ms, updated_at_ms) " +
-                    "VALUES (?, ?, ?, 'pending', 0, ?, ?, NULL, ?, ?)",
-                    SqlValue.text(JobSpec.queue(spec)) ::
-                    SqlValue.text(JobSpec.kind(spec)) ::
-                    SqlValue.text(payloadStr) ::
-                    SqlValue.int(JobSpec.maxAttempts(spec)) ::
-                    SqlValue.int64(runAt) ::
-                    SqlValue.int64(nowMs) ::
-                    SqlValue.int64(nowMs) ::
-                    Nil
-                );
-                k(buildNewJob(id, spec, nowMs))
+                let inserted = Db.transaction(() -> {
+                    let existingOpt = match JobSpec.uniqueKey(spec) {
+                        case None => None
+                        case Some(uKey) =>
+                            Db.queryOneMap(
+                                "${selectCols()} WHERE unique_key = ? AND status IN ('pending', 'running') ORDER BY id ASC LIMIT 1",
+                                SqlValue.text(uKey) :: Nil,
+                                decodeJobRow
+                            )
+                    };
+                    match existingOpt {
+                        case Some(existing) => existing
+                        case None =>
+                            let runAt = nowMs + JobSpec.delayMs(spec);
+                            let payloadStr = Json.encode(JobSpec.payload(spec));
+                            let id = Db.insertAndGetId(
+                                "INSERT INTO _weft_jobs (queue, kind, payload, status, attempts, max_attempts, run_at_ms, last_error, unique_key, created_at_ms, updated_at_ms) " +
+                                "VALUES (?, ?, ?, 'pending', 0, ?, ?, NULL, ?, ?, ?)",
+                                SqlValue.text(JobSpec.queue(spec)) ::
+                                SqlValue.text(JobSpec.kind(spec)) ::
+                                SqlValue.text(payloadStr) ::
+                                SqlValue.int(JobSpec.maxAttempts(spec)) ::
+                                SqlValue.int64(runAt) ::
+                                SqlValue.optionalText(JobSpec.uniqueKey(spec)) ::
+                                SqlValue.int64(nowMs) ::
+                                SqlValue.int64(nowMs) ::
+                                Nil
+                            );
+                            buildNewJob(id, spec, nowMs)
+                    }
+                });
+                k(inserted)
             }
 
             def claimNext(queue, nowMs, k) = {
                 let claimed = Db.transaction(() -> {
                     match Db.queryOneMap(
-                        "SELECT id, queue, kind, payload, status, attempts, max_attempts, run_at_ms, last_error, created_at_ms, updated_at_ms " +
-                        "FROM _weft_jobs WHERE queue = ? AND status = 'pending' AND run_at_ms <= ? " +
+                        "${selectCols()} WHERE queue = ? AND status = 'pending' AND run_at_ms <= ? " +
                         "ORDER BY run_at_ms ASC, id ASC LIMIT 1",
                         SqlValue.text(queue) :: SqlValue.int64(nowMs) :: Nil,
                         decodeJobRow
@@ -269,10 +320,26 @@ pub mod Weft.JobStore {
                 k()
             }
 
+            def reclaimStale(staleBeforeMs, nowMs, k) = {
+                let reclaimed = Db.transaction(() -> {
+                    let retryCount = Db.execute(
+                        "UPDATE _weft_jobs SET status = 'pending', run_at_ms = ?, last_error = 'Reclaimed stale running job', updated_at_ms = ? " +
+                        "WHERE status = 'running' AND updated_at_ms <= ? AND attempts < max_attempts",
+                        SqlValue.int64(nowMs) :: SqlValue.int64(nowMs) :: SqlValue.int64(staleBeforeMs) :: Nil
+                    );
+                    let deadCount = Db.execute(
+                        "UPDATE _weft_jobs SET status = 'dead', last_error = 'Reclaimed stale running job after max attempts', updated_at_ms = ? " +
+                        "WHERE status = 'running' AND updated_at_ms <= ? AND attempts >= max_attempts",
+                        SqlValue.int64(nowMs) :: SqlValue.int64(staleBeforeMs) :: Nil
+                    );
+                    retryCount + deadCount
+                });
+                k(reclaimed)
+            }
+
             def findJob(id, k) = {
                 let found = Db.queryOneMap(
-                    "SELECT id, queue, kind, payload, status, attempts, max_attempts, run_at_ms, last_error, created_at_ms, updated_at_ms " +
-                    "FROM _weft_jobs WHERE id = ?",
+                    "${selectCols()} WHERE id = ?",
                     SqlValue.int64(id) :: Nil,
                     decodeJobRow
                 );
@@ -282,33 +349,13 @@ pub mod Weft.JobStore {
             def listJobs(qOpt, stOpt, k) = {
                 let rows = match (qOpt, stOpt) {
                     case (None, None) =>
-                        Db.queryMap(
-                            "SELECT id, queue, kind, payload, status, attempts, max_attempts, run_at_ms, last_error, created_at_ms, updated_at_ms " +
-                            "FROM _weft_jobs ORDER BY id ASC",
-                            Nil,
-                            decodeJobRow
-                        )
+                        Db.queryMap("${selectCols()} ORDER BY id ASC", Nil, decodeJobRow)
                     case (Some(q), None) =>
-                        Db.queryMap(
-                            "SELECT id, queue, kind, payload, status, attempts, max_attempts, run_at_ms, last_error, created_at_ms, updated_at_ms " +
-                            "FROM _weft_jobs WHERE queue = ? ORDER BY id ASC",
-                            SqlValue.text(q) :: Nil,
-                            decodeJobRow
-                        )
+                        Db.queryMap("${selectCols()} WHERE queue = ? ORDER BY id ASC", SqlValue.text(q) :: Nil, decodeJobRow)
                     case (None, Some(st)) =>
-                        Db.queryMap(
-                            "SELECT id, queue, kind, payload, status, attempts, max_attempts, run_at_ms, last_error, created_at_ms, updated_at_ms " +
-                            "FROM _weft_jobs WHERE status = ? ORDER BY id ASC",
-                            SqlValue.text("${st}") :: Nil,
-                            decodeJobRow
-                        )
+                        Db.queryMap("${selectCols()} WHERE status = ? ORDER BY id ASC", SqlValue.text("${st}") :: Nil, decodeJobRow)
                     case (Some(q), Some(st)) =>
-                        Db.queryMap(
-                            "SELECT id, queue, kind, payload, status, attempts, max_attempts, run_at_ms, last_error, created_at_ms, updated_at_ms " +
-                            "FROM _weft_jobs WHERE queue = ? AND status = ? ORDER BY id ASC",
-                            SqlValue.text(q) :: SqlValue.text("${st}") :: Nil,
-                            decodeJobRow
-                        )
+                        Db.queryMap("${selectCols()} WHERE queue = ? AND status = ? ORDER BY id ASC", SqlValue.text(q) :: SqlValue.text("${st}") :: Nil, decodeJobRow)
                 };
                 k(rows)
             }
@@ -327,6 +374,7 @@ pub mod Weft.JobStore {
             maxAttempts = JobSpec.maxAttempts(spec),
             runAtMs     = nowMs + JobSpec.delayMs(spec),
             lastError   = None,
+            uniqueKey   = JobSpec.uniqueKey(spec),
             createdAtMs = nowMs,
             updatedAtMs = nowMs
         })
@@ -346,6 +394,33 @@ pub mod Weft.JobStore {
     def transitionDead(j: Job, err: String, nowMs: Int64): Job =
         let Job.Job(r) = j;
         Job.Job({ status = JobStatus.Dead, lastError = Some(err), updatedAtMs = nowMs | r })
+
+    def findActiveByUniqueKey(keyOpt: Option[String], jobs: List[Job]): Option[Job] =
+        match keyOpt {
+            case None => None
+            case Some(uKey) =>
+                jobs
+                    |> List.filter(j ->
+                        Job.uniqueKey(j) == Some(uKey) and
+                        (Job.status(j) == JobStatus.Pending or Job.status(j) == JobStatus.Running)
+                    )
+                    |> List.sortBy(Job.id)
+                    |> List.head
+        }
+
+    def reclaimStaleInMap(staleBeforeMs: Int64, nowMs: Int64, m: Map[Int64, Job]): (Map[Int64, Job], Int32) =
+        Map.foldLeftWithKey((acc, id, j) -> {
+            let (curMap, count) = acc;
+            if (Job.status(j) == JobStatus.Running and Job.updatedAtMs(j) <= staleBeforeMs) {
+                let nextJob = if (Job.attempts(j) < Job.maxAttempts(j))
+                    transitionRetry(j, nowMs, "Reclaimed stale running job", nowMs)
+                else
+                    transitionDead(j, "Reclaimed stale running job after max attempts", nowMs);
+                (Map.insert(id, nextJob, curMap), count + 1)
+            } else {
+                (Map.insert(id, j, curMap), count)
+            }
+        }, (Map.empty(), 0), m)
 
     def updateJobInMap(id: Int64, f: Job -> Job, m: Map[Int64, Job]): Map[Int64, Job] =
         match Map.get(id, m) {
@@ -392,6 +467,7 @@ pub mod Weft.JobStore {
             maxAttempts = Row.requireInt("max_attempts", row),
             runAtMs     = Row.requireInt64("run_at_ms", row),
             lastError   = Row.optionalString("last_error", row),
+            uniqueKey   = Row.optionalString("unique_key", row),
             createdAtMs = Row.requireInt64("created_at_ms", row),
             updatedAtMs = Row.requireInt64("updated_at_ms", row)
         })

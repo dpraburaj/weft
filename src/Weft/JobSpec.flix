@@ -11,7 +11,8 @@ pub mod Weft.JobSpec {
             kind        = String,
             payload     = Json,
             delayMs     = Int64,
-            maxAttempts = Int32
+            maxAttempts = Int32,
+            uniqueKey   = Option[String]
         })
     }
 
@@ -24,7 +25,8 @@ pub mod Weft.JobSpec {
             kind        = kind,
             payload     = payload,
             delayMs     = 0i64,
-            maxAttempts = 3
+            maxAttempts = 3,
+            uniqueKey   = None
         })
 
     pub def withQueue(q: String, spec: JobSpec): JobSpec =
@@ -39,10 +41,20 @@ pub mod Weft.JobSpec {
         let JobSpec.JobSpec(r) = spec;
         JobSpec.JobSpec({ maxAttempts = Int32.max(1, n) | r })
 
-    pub def queue(spec: JobSpec): String     = let JobSpec.JobSpec(r) = spec; r#queue
-    pub def kind(spec: JobSpec): String      = let JobSpec.JobSpec(r) = spec; r#kind
-    pub def payload(spec: JobSpec): Json     = let JobSpec.JobSpec(r) = spec; r#payload
-    pub def delayMs(spec: JobSpec): Int64    = let JobSpec.JobSpec(r) = spec; r#delayMs
-    pub def maxAttempts(spec: JobSpec): Int32 = let JobSpec.JobSpec(r) = spec; r#maxAttempts
+    ///
+    /// Attaches an idempotency/deduplication key. If a `Pending` or `Running` job
+    /// with the same `uniqueKey` already exists, `JobStore.insertJob` returns the
+    /// existing job instead of inserting a duplicate.
+    ///
+    pub def withUniqueKey(key: String, spec: JobSpec): JobSpec =
+        let JobSpec.JobSpec(r) = spec;
+        JobSpec.JobSpec({ uniqueKey = Some(key) | r })
+
+    pub def queue(spec: JobSpec): String            = let JobSpec.JobSpec(r) = spec; r#queue
+    pub def kind(spec: JobSpec): String             = let JobSpec.JobSpec(r) = spec; r#kind
+    pub def payload(spec: JobSpec): Json            = let JobSpec.JobSpec(r) = spec; r#payload
+    pub def delayMs(spec: JobSpec): Int64           = let JobSpec.JobSpec(r) = spec; r#delayMs
+    pub def maxAttempts(spec: JobSpec): Int32       = let JobSpec.JobSpec(r) = spec; r#maxAttempts
+    pub def uniqueKey(spec: JobSpec): Option[String] = let JobSpec.JobSpec(r) = spec; r#uniqueKey
 
 }
