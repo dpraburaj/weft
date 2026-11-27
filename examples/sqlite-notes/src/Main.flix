@@ -145,7 +145,7 @@ mod NotesApp {
         ) |> HttpError.orNotFound("Note #${id} not found")
     }
 
-    def deleteNote(): Response \ {Req, HttpError, Auth, Db} = {
+    def deleteNote(): Response \ {Req, HttpError, Auth, Db, DbError} = {
         Auth.requireRole("admin");
         let id = Req.requireIntParam("id");
         let deleted = Db.execute("DELETE FROM notes WHERE id = ?", SqlValue.int(id) :: Nil);

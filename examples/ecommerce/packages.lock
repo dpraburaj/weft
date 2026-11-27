@@ -1,6 +1,6 @@
 [lock]
 version = 1
 
-[packages."github:dpraburaj/weft"."0.10.0"]
-toml    = "sha256:c537a1d00e3e2d1b0cea0e774fff1fc13e0153594b08f2cbaec8c67caefe4a56"
-fpkg    = "sha256:e163632068dacf9f02a52f7c73fbb0c366cad914b6c3b5f0b83da32dcf15836a"
+[packages."github:dpraburaj/weft"."0.11.0"]
+toml    = "sha256:f2b6082b16063c74a7689e1f723a4d1d06770aea8cae0df497474d8fe468d720"
+fpkg    = "sha256:49ce10f769e976cb2625f9209752a1ac9c6f1d21d23d35c54dbc5a387115a39c"

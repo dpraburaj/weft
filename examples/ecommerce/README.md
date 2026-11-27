@@ -1,6 +1,6 @@
 # Weft Roasters — Real-World E-Commerce Example
 
-A complete server-rendered **Flix + Weft + SQLite (WAL pooled) + HTMX** e-commerce storefront, customer portal, admin dashboard, JSON/SSE catalog API, and scheduled maintenance worker demonstrating Weft `v0.10.0`, structured using **Vertical Slice Architecture** (Jimmy Bogard) + **Algebraic-Effect Persistence Stores** (Repository Pattern).
+A complete server-rendered **Flix + Weft + SQLite (WAL pooled) + HTMX** e-commerce storefront, customer portal, admin dashboard, JSON/SSE catalog API, and scheduled maintenance worker demonstrating Weft `v0.11.0`, structured using **Vertical Slice Architecture** (Jimmy Bogard) + **Algebraic-Effect Persistence Stores** (Repository Pattern).
 
 ## Architecture (Vertical Slices + Algebraic-Effect Stores)
 
