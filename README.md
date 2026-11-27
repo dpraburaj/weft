@@ -17,7 +17,7 @@ Or add it directly to your `flix.toml`:
 
 ```toml
 [dependencies]
-"github:dpraburaj/weft" = { version = "0.8.0", mount = "weft", security = "unrestricted" }
+"github:dpraburaj/weft" = { version = "0.9.0", mount = "weft", security = "unrestricted" }
 ```
 
 > `security = "unrestricted"` is required by Flix because Weft uses Java interop (`HttpServer`, virtual threads) and bundles `org.xerial:sqlite-jdbc`.
@@ -171,11 +171,11 @@ let handle = JobWorker.startBackground(WorkerConfig.default(), () -> ...);
 ## Modules
 
 - `Weft` — Core type aliases (`Handler[ef]`, `App[ef]`, `JobHandler[ef]`)
-- `Weft.{Body,Method,Status,Headers,SameSite,Cookie,Request,Response,WithStatus,IntoResponse}` — HTTP value types (text + binary `Vector[Int8]` bodies) and `IntoResponse` trait
+- `Weft.{Body,Method,Status,Headers,SameSite,Cookie,Request,Response,StreamWriter,SseEvent,WithStatus,IntoResponse}` — HTTP value types (text, binary `Vector[Int8]`, and chunked `Body.Stream` / SSE), plus `IntoResponse` trait
 - `Weft.Url` — UTF-8 percent-encoding/decoding, single & multi-value query/form parsing (`parseQuery`, `parseQueryAll`, `encodeQuery`), path normalization
 - `Weft.{Multipart,MultipartForm,UploadedFile}` — Pure binary RFC 7578 `multipart/form-data` parser & encoder preserving raw uploaded file bytes
-- `Weft.{Mime,StaticFile,StaticConfig,StaticStore,StaticFiles}` — Effect-polymorphic static file serving with MIME detection, `ETag`/`304 Not Modified`, `Cache-Control`, and path-traversal/dotfile protection
-- `Weft.Accept` — RFC 9110 `Accept` header parsing and content negotiation (`negotiate`, `prefersHtml`, `prefersJson`)
+- `Weft.{Mime,ByteRange,StaticFile,StaticConfig,StaticStore,StaticFiles}` — Effect-polymorphic static file serving with MIME detection, `ETag`/`304 Not Modified`, HTTP `Range` (`206 Partial Content` / `416`), `Cache-Control`, and path-traversal/dotfile protection
+- `Weft.{Accept,Compression,CompressionConfig}` — RFC 9110 `Accept` content negotiation (`negotiate`, `prefersHtml`, `prefersJson`) and `gzip`/`deflate` compression (`Middleware.compress` / `compressWith`)
 - `Weft.{Validate,ValidationErrors,ValidationError}` — Accumulating multi-field form & JSON validation effect with `422` JSON rendering and inline `Weft.Html` field error helpers
 - `Weft.Json` — Pure Flix RFC 8259 JSON AST, encoder, parser, and `HttpError`-integrated extractors (`requireInt64`, `requireFloat`, `requireArray`, `requireObject`, `optional*`)
 - `Weft.{Html,HtmlDoc}` — Ergonomic, XSS-safe algebraic-effect HTML builder (`IntoResponse`, class merging, control-flow & HTMX helpers)
@@ -183,7 +183,7 @@ let handle = JobWorker.startBackground(WorkerConfig.default(), () -> ...);
 - `Weft.{Random,Crypto,CsrfConfig,Csrf}` — CSPRNG/deterministic `Random` effect, SHA-256, HMAC-SHA256 webhook & cookie signing, PBKDF2-HMAC-SHA256 password hashing, constant-time comparisons, and CSRF protection (`Csrf.hiddenInput`, `Csrf.metaTag`, `Middleware.csrf`)
 - `Weft.{Session,SessionConfig,SessionData,SessionStore,InMemorySessionStore}` — Signed cookie sessions with flash messages, session rotation (`Auth.loginSession`), and Pure / InMemory / SQLite storage backends
 - `Weft.Router` — Effect-polymorphic `Router[ef]` (`:param`, `*wildcard`, `scope`, `merge`, `withMiddleware`, `HEAD` fallback, `405` + `Allow`)
-- `Weft.{CorsConfig,Middleware}` — `errorJson`, `errorText`, `errorHtml`, `errorWith`, `errorNegotiated`, `errorNegotiatedWith`, `routeErrorJson`, `routeErrorHtml`, `validationErrorJson`, `dbErrorToHttp`, `dbErrorToHttpSafe`, `storageErrorToHttp`, `mailErrorToHttp`, `recoverAbort`, `recoverAbortNegotiated`, `session`, `bearerAuth`, `sessionAuth`, `sessionAuthOrRedirect`, `optionalSessionAuth`, `optionalBearerAuth`, `requireRole`, `csrf`, `csrfApp`, `maxBodySize`, `limitBodySize`, `throttle`, `throttleBy`, `throttleRoute`, `requestLogger`, `timingHeader`, `cors`, `securityHeaders`
+- `Weft.{CorsConfig,Middleware}` — `errorJson`, `errorText`, `errorHtml`, `errorWith`, `errorNegotiated`, `errorNegotiatedWith`, `routeErrorJson`, `routeErrorHtml`, `validationErrorJson`, `dbErrorToHttp`, `dbErrorToHttpSafe`, `storageErrorToHttp`, `mailErrorToHttp`, `recoverAbort`, `recoverAbortNegotiated`, `session`, `bearerAuth`, `sessionAuth`, `sessionAuthOrRedirect`, `optionalSessionAuth`, `optionalBearerAuth`, `requireRole`, `csrf`, `csrfApp`, `maxBodySize`, `limitBodySize`, `throttle`, `throttleBy`, `throttleRoute`, `compress`, `compressWith`, `requestLogger`, `timingHeader`, `cors`, `securityHeaders`
 - `Weft.{Db,DbError,DbErrorKind,SqlValue,Row,Migration,SqlBuilder,Page}` & `Weft.Db.{Sqlite,SqliteConfig,SqliteDb}` — Driver-agnostic SQL effects, nested savepoints, trigger-safe migrations, dynamic `SqlBuilder` (`IN`, `WHERE`, pagination), and SQLite backend
 - `Weft.{Job,JobSpec,JobStatus,JobError,JobQueue,JobStore,JobBackend,JobRegistry,JobWorker,WorkerConfig,WorkerHandle,InMemoryJobStore}` — Background job runner with `uniqueKey` deduplication, stale-job recovery (`reclaimStale`), and transactional outbox (`JobQueue.runWithDb`)
 - `Weft.{RateLimiter,RateLimitConfig,RateLimitDecision,InMemoryRateLimiter}` — Fixed-window rate limiter effect (Pure / InMemory / SQLite) and `Middleware.throttle` / `throttleBy` / `throttleRoute`
@@ -192,7 +192,7 @@ let handle = JobWorker.startBackground(WorkerConfig.default(), () -> ...);
 - `Weft.{Storage,StoredFile,StorageError,StorageErrorKind,InMemoryStorage}` — Path-traversal-safe writable file storage (Pure / InMemory / LocalDir) with `UploadedFile` and `StaticStore` bridges
 - `Weft.{Mailer,Email,MailError}` — Transactional email effect with `HtmlDoc` bodies, `Mailer.runRecording` (`Mail::fake()`), `runLogging`, `runWithResend`/`runWithHttpApi`, and `JobQueue` async delivery
 - `Weft.{HttpClient,ClientRequest,ClientResponse,Env}` — Outbound JDK 21 `HttpClient` effect (with pure `runMock`/`runRecording`) and typed `Env` / `.env` config effect
-- `Weft.{Server,ServerConfig,ServerHandle}` — JDK 21 virtual-thread HTTP/1.1 server with binary streaming and configurable `maxBodyBytes` cap (`413 Payload Too Large`)
+- `Weft.{Server,ServerConfig,ServerHandle,TlsConfig}` — JDK 21 virtual-thread HTTP/HTTPS server with TLS (`HttpsServer`), read/handler timeouts (`408`/`504`), chunked streaming & SSE, configurable `maxBodyBytes` (`413`), and coordinated graceful shutdown (`serveWithShutdown`)
 - `Weft.{TestClient,TestSession,TestEffects}` — Stateless `TestClient` (`get`, `postJson`, `postForm`, `postBytes`, `postMultipart`, `extractCsrfToken`), pure stateful `TestSession` (cookie jar + automatic redirect following for multi-step journeys), and deterministic pure `TestEffects` (`Logger`, `Time.Clock`)
 
 ## Examples

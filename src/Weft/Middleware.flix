@@ -2,6 +2,8 @@ pub mod Weft.Middleware {
     use Weft.Accept
     use Weft.App
     use Weft.Auth
+    use Weft.Compression
+    use Weft.CompressionConfig
     use Weft.CorsConfig
     use Weft.Csrf
     use Weft.CsrfConfig
@@ -419,6 +421,77 @@ pub mod Weft.Middleware {
     ///
     pub def addResponseHeader(name: String, value: String, app: App[ef]): App[ef] = req ->
         app(req) |> Response.withHeader(name, value)
+
+    // --- Response Compression Middleware (Gzip / Deflate) ---
+
+    ///
+    /// Compresses eligible responses (`>= 256` bytes, compressible `Content-Type`,
+    /// non-streaming) using `gzip` or `deflate` based on the request's `Accept-Encoding` header.
+    ///
+    pub def compress(app: App[ef]): App[ef] =
+        compressWith(CompressionConfig.default(), app)
+
+    ///
+    /// Like `compress`, using a custom `CompressionConfig`.
+    ///
+    /// - Preserves/appends `Vary: Accept-Encoding`.
+    /// - Skips `HEAD`, `204`, `304`, streaming responses (`Body.Stream`), already-encoded
+    ///   responses, non-compressible media types (PNG/JPEG/ZIP/SSE), and bodies smaller
+    ///   than `CompressionConfig.minBytes(cfg)`.
+    /// - Weakens strong `ETag` headers (`"..."` -> `W/"..."`) per RFC 9110 when transforming the body.
+    ///
+    pub def compressWith(cfg: CompressionConfig, app: App[ef]): App[ef] = req -> {
+        let res = app(req);
+        let code = Status.code(Response.status(res));
+        let skipStatus = Request.method(req) == Method.Head or code == 204 or code == 304;
+        let alreadyEncoded = Option.nonEmpty(Response.header("Content-Encoding", res));
+        if (skipStatus or alreadyEncoded or Response.isStream(res))
+            res
+        else if (not Compression.isCompressibleContentType(Response.header("Content-Type", res)))
+            res
+        else {
+            let rawBytes = Response.bodyBytes(res);
+            let rawLen = Vector.length(rawBytes);
+            if (rawLen < CompressionConfig.minBytes(cfg))
+                res
+            else {
+                match Compression.negotiateEncoding(cfg, Request.header("Accept-Encoding", req)) {
+                    case None =>
+                        appendVaryAcceptEncoding(res)
+                    case Some(enc) =>
+                        let compressed = if (enc == "gzip")
+                            Compression.gzip(rawBytes)
+                        else
+                            Compression.deflate(rawBytes);
+                        if (Vector.length(compressed) >= rawLen)
+                            appendVaryAcceptEncoding(res)
+                        else {
+                            let r1 = res
+                                |> Response.withBytes(compressed)
+                                |> Response.withHeader("Content-Encoding", enc)
+                                |> appendVaryAcceptEncoding;
+                            match Response.header("ETag", r1) {
+                                case Some(et) => Response.withHeader("ETag", Compression.weakenEtag(et), r1)
+                                case None     => r1
+                            }
+                        }
+                }
+            }
+        }
+    }
+
+    def appendVaryAcceptEncoding(res: Response): Response =
+        match Response.header("Vary", res) {
+            case None =>
+                Response.withHeader("Vary", "Accept-Encoding", res)
+            case Some(existing) =>
+                let already = String.splitOn({substr = ","}, existing)
+                    |> List.exists(tok -> {
+                        let t = String.toLowerCase(String.trim(tok));
+                        t == "accept-encoding" or t == "*"
+                    });
+                if (already) res else Response.withHeader("Vary", "${existing}, Accept-Encoding", res)
+        }
 
     // --- Rate Limiting / Throttling Middleware ---
 

@@ -3,7 +3,9 @@ pub mod Weft.Response {
     use Weft.Cookie
     use Weft.Headers
     use Weft.Response
+    use Weft.SseEvent
     use Weft.Status
+    use Weft.StreamWriter
 
     ///
     /// Represents an immutable outgoing HTTP response.
@@ -67,6 +69,38 @@ pub mod Weft.Response {
         makeBody(Status.ok(), Headers.singleton("Content-Type", contentType), Body.bytes(data))
 
     ///
+    /// Returns a `200 OK` chunked streaming response with the given `Content-Type`.
+    /// The server flushes chunks as `writer` emits them without buffering the full response.
+    ///
+    pub def stream(contentType: String, writer: StreamWriter -> Unit \ IO): Response =
+        makeBody(Status.ok(), Headers.singleton("Content-Type", contentType), Body.stream(writer))
+
+    ///
+    /// Returns a `200 OK` Server-Sent Events (`text/event-stream`) live streaming response
+    /// with `Cache-Control: no-cache` and `X-Accel-Buffering: no`.
+    ///
+    pub def sse(writer: StreamWriter -> Unit \ IO): Response = {
+        let h = Headers.empty()
+            |> Headers.set("Content-Type", "text/event-stream; charset=utf-8")
+            |> Headers.set("Cache-Control", "no-cache")
+            |> Headers.set("X-Accel-Buffering", "no");
+        makeBody(Status.ok(), h, Body.stream(writer))
+    }
+
+    ///
+    /// Returns a 100% pure `200 OK` Server-Sent Events (`text/event-stream`) response
+    /// encoding a finite list of `SseEvent` frames (ideal for short bursts and zero-IO tests).
+    ///
+    pub def sseEvents(events: List[SseEvent]): Response = {
+        let encoded = List.map(SseEvent.encode, events) |> String.intercalate("");
+        let h = Headers.empty()
+            |> Headers.set("Content-Type", "text/event-stream; charset=utf-8")
+            |> Headers.set("Cache-Control", "no-cache")
+            |> Headers.set("X-Accel-Buffering", "no");
+        makeBody(Status.ok(), h, Body.text(encoded))
+    }
+
+    ///
     /// Returns a `201 Created` plain-text response.
     ///
     pub def created(b: String): Response =
@@ -108,6 +142,9 @@ pub mod Weft.Response {
     pub def body(res: Response): String         = Body.asText(bodyValue(res))
     pub def bodyBytes(res: Response): Vector[Int8] = Body.asBytes(bodyValue(res))
     pub def bodyLength(res: Response): Int32    = Body.byteLength(bodyValue(res))
+    pub def isStream(res: Response): Bool       = Body.isStream(bodyValue(res))
+    pub def collectBodyBytes(res: Response): Vector[Int8] \ IO = Body.collectBytes(bodyValue(res))
+    pub def collectBody(res: Response): String \ IO = Body.collectText(bodyValue(res))
 
     pub def header(name: String, res: Response): Option[String] =
         Headers.get(name, headers(res))

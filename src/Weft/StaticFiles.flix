@@ -1,4 +1,5 @@
 pub mod Weft.StaticFiles {
+    use Weft.ByteRange
     use Weft.Handler
     use Weft.HttpError
     use Weft.Req
@@ -7,6 +8,7 @@ pub mod Weft.StaticFiles {
     use Weft.StaticConfig
     use Weft.StaticFile
     use Weft.StaticStore
+    use Weft.Status
     use Weft.Url
 
     import java.time.Instant
@@ -61,9 +63,31 @@ pub mod Weft.StaticFiles {
         let baseRes = if (isNotModified) {
             Response.notModified()
         } else {
-            let r0 = Response.bytes(StaticFile.contentType(file), StaticFile.data(file));
+            let fullData = StaticFile.data(file);
+            let totalLen = Vector.length(fullData);
+            let ct = StaticFile.contentType(file);
+            let r0 = match Req.header("Range") {
+                case Some(rangeHdr) =>
+                    match ByteRange.parse(rangeHdr, totalLen) {
+                        case ByteRange.Satisfiable(startIdx, endIdx) =>
+                            Response.bytes(ct, ByteRange.slice(startIdx, endIdx, fullData))
+                                |> Response.withStatus(Status.partialContent())
+                                |> Response.withHeader("Content-Range", ByteRange.contentRange(startIdx, endIdx, totalLen))
+                                |> Response.withHeader("Accept-Ranges", "bytes")
+                        case ByteRange.Unsatisfiable =>
+                            Response.makeBody(Status.rangeNotSatisfiable(), Weft.Headers.empty(), Weft.Body.empty())
+                                |> Response.withHeader("Content-Range", ByteRange.unsatisfiableRange(totalLen))
+                                |> Response.withHeader("Accept-Ranges", "bytes")
+                        case ByteRange.Ignored =>
+                            Response.bytes(ct, fullData)
+                                |> Response.withHeader("Accept-Ranges", "bytes")
+                    }
+                case None =>
+                    Response.bytes(ct, fullData)
+                        |> Response.withHeader("Accept-Ranges", "bytes")
+            };
             let mtime = StaticFile.lastModifiedMs(file);
-            if (mtime > 0i64)
+            if (mtime > 0i64 and Response.status(r0) != Status.rangeNotSatisfiable())
                 Response.withHeader("Last-Modified", formatHttpDate(mtime), r0)
             else
                 r0
