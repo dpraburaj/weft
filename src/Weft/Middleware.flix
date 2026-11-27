@@ -11,10 +11,14 @@ pub mod Weft.Middleware {
     use Weft.HtmlDoc
     use Weft.HttpError
     use Weft.Json
+    use Weft.MailError
     use Weft.Method
     use Weft.OptionalAuth
     use Weft.Principal
     use Weft.Random
+    use Weft.RateLimitConfig
+    use Weft.RateLimitDecision
+    use Weft.RateLimiter
     use Weft.Req
     use Weft.Request
     use Weft.Response
@@ -22,6 +26,7 @@ pub mod Weft.Middleware {
     use Weft.SessionConfig
     use Weft.SessionStore
     use Weft.Status
+    use Weft.StorageError
     use Weft.ValidationError
     use Weft.ValidationErrors
     use Time.Clock
@@ -148,6 +153,23 @@ pub mod Weft.Middleware {
         run {
             app(req)
         } with DbError.runToHttpErrorSafe
+
+    ///
+    /// Discharges `StorageError` by translating storage failures into `HttpError`
+    /// (`NotFound` -> `404`, `InvalidPath` -> `400`, `PermissionDenied` -> `403`, `IoError` -> `500`).
+    ///
+    pub def storageErrorToHttp(app: App[ef]): App[(ef - StorageError) + HttpError] = req ->
+        run {
+            app(req)
+        } with StorageError.runToHttpError
+
+    ///
+    /// Discharges `MailError` by translating mail delivery failures into `502 Bad Gateway` via `HttpError`.
+    ///
+    pub def mailErrorToHttp(app: App[ef]): App[(ef - MailError) + HttpError] = req ->
+        run {
+            app(req)
+        } with MailError.runToHttpError
 
     ///
     /// Discharges Flix's standard `Abort` effect, converting any abort into a
@@ -397,5 +419,98 @@ pub mod Weft.Middleware {
     ///
     pub def addResponseHeader(name: String, value: String, app: App[ef]): App[ef] = req ->
         app(req) |> Response.withHeader(name, value)
+
+    // --- Rate Limiting / Throttling Middleware ---
+
+    ///
+    /// App-level rate-limiting middleware keyed by client IP (`X-Forwarded-For` first entry,
+    /// `X-Real-IP`, or `"global"` fallback).
+    ///
+    /// Attaches `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset` to every
+    /// response, and returns `429 Too Many Requests` with `Retry-After` when exceeded
+    /// (content-negotiated HTML vs JSON via `Accept`).
+    ///
+    pub def throttle(cfg: RateLimitConfig, app: App[ef]): App[ef + {RateLimiter, Clock}] =
+        throttleBy(cfg, defaultThrottleKey, app)
+
+    ///
+    /// App-level rate-limiting middleware using a custom key extractor `keyFn`
+    /// (e.g. per API key, per route + IP, or per tenant).
+    ///
+    pub def throttleBy(
+        cfg: RateLimitConfig,
+        keyFn: Request -> String \ ef2,
+        app: App[ef1]
+    ): App[ef1 + ef2 + {RateLimiter, Clock}] = req -> {
+        let key = keyFn(req);
+        let decision = RateLimiter.check(cfg, key);
+        if (RateLimitDecision.isAllowed(decision)) {
+            let res = app(req);
+            RateLimitDecision.applyHeaders(decision, res)
+        } else {
+            tooManyRequestsResponse(req, decision)
+        }
+    }
+
+    ///
+    /// Route-level rate-limiting middleware for `Router.withMiddleware`.
+    /// `keyFn` may use any active effects (such as `Req` or `Auth.userId()`).
+    ///
+    pub def throttleRoute(
+        cfg: RateLimitConfig,
+        keyFn: Unit -> String \ ef2,
+        h: Handler[ef1]
+    ): Handler[ef1 + ef2 + {Req, RateLimiter, Clock}] = () -> {
+        let key = keyFn();
+        let decision = RateLimiter.check(cfg, key);
+        if (RateLimitDecision.isAllowed(decision)) {
+            let res = checked_ecast(h());
+            RateLimitDecision.applyHeaders(decision, res)
+        } else {
+            tooManyRequestsResponse(Req.request(), decision)
+        }
+    }
+
+    def defaultThrottleKey(req: Request): String =
+        match Request.header("X-Forwarded-For", req) {
+            case Some(raw) =>
+                match List.head(String.splitOn({substr = ","}, raw)) {
+                    case Some(first) =>
+                        let trimmed = String.trim(first);
+                        if (String.isEmpty(trimmed)) "global" else trimmed
+                    case None => "global"
+                }
+            case None =>
+                match Request.header("X-Real-IP", req) {
+                    case Some(ip) =>
+                        let trimmed = String.trim(ip);
+                        if (String.isEmpty(trimmed)) "global" else trimmed
+                    case None => "global"
+                }
+        }
+
+    def tooManyRequestsResponse(req: Request, decision: RateLimitDecision): Response = {
+        let secs = RateLimitDecision.retryAfterSeconds(decision);
+        let msg = "Too many requests. Please retry after ${secs}s.";
+        let base = if (Accept.prefersHtml(req)) {
+            let doc = Html.page("429 Too Many Requests", () ->
+                Html.main_(() -> {
+                    Html.h1Text("429 Too Many Requests");
+                    Html.pText(msg)
+                })
+            );
+            HtmlDoc.toResponseWithStatus(Status.tooManyRequests(), doc)
+        } else {
+            let payload = Json.obj(
+                ("status",       Json.int(429)) ::
+                ("reason",       Json.str("Too Many Requests")) ::
+                ("error",        Json.str(msg)) ::
+                ("retryAfterMs", Json.int64(RateLimitDecision.retryAfterMs(decision))) ::
+                Nil
+            );
+            Json.toResponseWithStatus(Status.tooManyRequests(), payload)
+        };
+        RateLimitDecision.applyHeaders(decision, base)
+    }
 
 }
