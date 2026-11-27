@@ -3,4 +3,4 @@ version = 1
 
 [packages."github:dpraburaj/weft"."0.10.0"]
 toml    = "sha256:c537a1d00e3e2d1b0cea0e774fff1fc13e0153594b08f2cbaec8c67caefe4a56"
-fpkg    = "sha256:92a399535a8555a2bdcb76837faa4e4492b0fe5254e2f36bef05c3a60b7b42a2"
+fpkg    = "sha256:4582f0be5d11c495c4472de5470ff1e9f3801ede0001724148d9c7ae9b98afc2"

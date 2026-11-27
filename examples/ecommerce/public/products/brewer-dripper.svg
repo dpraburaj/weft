@@ -1,0 +1,15 @@
+<svg viewBox="0 0 320 240" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Ceramic Ribbed Pour-Over Dripper">
+  <rect width="320" height="240" fill="#f0ece4"/>
+  <line x1="32" y1="204" x2="288" y2="204" stroke="#dcd8ce" stroke-width="1"/>
+  <g stroke="#171614" stroke-width="1.5" fill="none" stroke-linejoin="round">
+    <path d="M106 60 L214 60 L182 142 L138 142 Z" fill="#fbfaf7"/>
+    <line x1="122" y1="60" x2="146" y2="142" stroke="#d2ccc0" stroke-width="1"/>
+    <line x1="144" y1="60" x2="155" y2="142" stroke="#d2ccc0" stroke-width="1"/>
+    <line x1="166" y1="60" x2="164" y2="142" stroke="#d2ccc0" stroke-width="1"/>
+    <line x1="188" y1="60" x2="173" y2="142" stroke="#d2ccc0" stroke-width="1"/>
+    <rect x="122" y="142" width="76" height="8" rx="2" fill="#8c4a27"/>
+    <path d="M134 150 L186 150 L194 198 L126 198 Z" fill="rgba(255,255,255,0.65)"/>
+    <path d="M198 76 C220 76 220 118 193 118"/>
+  </g>
+  <text x="24" y="222" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="8.5" letter-spacing="1" fill="#6b665d">RIBBED STONEWARE</text>
+</svg>

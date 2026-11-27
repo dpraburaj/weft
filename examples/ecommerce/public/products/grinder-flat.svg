@@ -1,0 +1,14 @@
+<svg viewBox="0 0 320 240" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Precision 64mm Flat Burr Grinder">
+  <rect width="320" height="240" fill="#eceae5"/>
+  <line x1="32" y1="204" x2="288" y2="204" stroke="#dcd8ce" stroke-width="1"/>
+  <g stroke="#171614" stroke-width="1.5" fill="none">
+    <rect x="108" y="188" width="104" height="10" rx="2" fill="#171614"/>
+    <rect x="118" y="88" width="64" height="100" rx="2" fill="#262523"/>
+    <path d="M122 88 L112 46 L188 46 L178 88 Z" fill="#fbfaf7"/>
+    <rect x="176" y="104" width="24" height="14" rx="2" fill="#8c4a27"/>
+    <rect x="180" y="152" width="28" height="36" rx="2" fill="#fbfaf7"/>
+    <circle cx="150" cy="126" r="16" stroke="#fbfaf7" stroke-width="1.2"/>
+    <circle cx="150" cy="126" r="4" fill="#8c4a27" stroke="none"/>
+  </g>
+  <text x="24" y="222" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="8.5" letter-spacing="1" fill="#6b665d">64MM FLAT BURR</text>
+</svg>

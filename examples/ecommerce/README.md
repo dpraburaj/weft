@@ -16,7 +16,7 @@ examples/ecommerce/
 │   ├── Shared.flix               # Shared kernel namespace root
 │   ├── Shared/                   # Shared kernel (domain types + cross-slice utilities)
 │   │   ├── Domain.flix           # Shared cross-feature domain types (`Product`, `CartLine`, `User`, `Order`, etc.)
-│   │   ├── Artwork.flix          # Bespoke SVG product packaging/hardware illustrations & crisp admin nav icons
+│   │   ├── Artwork.flix          # Static SVG artwork resolver (`/static/products/*.svg`) & crisp admin nav icons
 │   │   ├── Schema.flix           # Versioned SQLite migrations + idempotent demo seeding
 │   │   ├── Layout.flix           # Editorial storefront shell + calm light-neutral multi-page Admin shell
 │   │   ├── CartContext.flix      # Shared cart ownership + CartStore badge count helpers
@@ -60,7 +60,8 @@ examples/ecommerce/
 │       └── TestAdmin.flix        # Admin RBAC 403, multipart PNG upload + BLOB serving, HTMX stock & status
 └── public/
     ├── styles.css
-    └── brand-mark.svg
+    ├── brand-mark.svg
+    └── products/*.svg            # Static product packaging & gear illustrations served with ETag/304
 ```
 
 ## Features Demonstrated

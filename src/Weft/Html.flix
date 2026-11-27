@@ -36,14 +36,6 @@ pub mod Weft.Html {
         def addRaw(content: String): Unit
     }
 
-    type alias Frame = {
-        tag      = String,
-        isVoid   = Bool,
-        classes  = List[String],
-        attrs    = List[(String, Option[String])],
-        children = List[String]
-    }
-
     // --- Handlers / Entry Points ---
 
     ///
@@ -56,45 +48,86 @@ pub mod Weft.Html {
     ///
     /// Renders an `Html`-effectful builder block directly into a `String`.
     ///
+    /// Uses a single shared `StringBuilder` with deferred open-tag flushing so leaf
+    /// content is written once in O(output_size) instead of O(depth * output_size).
+    ///
     pub def renderString(f: Unit -> Unit \ ef): String \ (ef - Html) = region rc {
-        let rootFrame: Frame = {
-            tag      = "",
-            isVoid   = false,
-            classes  = Nil,
-            attrs    = Nil,
-            children = Nil
-        };
-        let stack: Ref[List[Frame], rc] = Ref.fresh(rc, rootFrame :: Nil);
+        let out = StringBuilder.empty(rc);
+        let openTagName: Ref[Option[String], rc] = Ref.fresh(rc, None);
+        let openIsVoid: Ref[Bool, rc] = Ref.fresh(rc, false);
+        let openClasses: Ref[List[String], rc] = Ref.fresh(rc, Nil);
+        let openAttrs: Ref[List[(String, Option[String])], rc] = Ref.fresh(rc, Nil);
+        let closedTagStack: Ref[List[String], rc] = Ref.fresh(rc, Nil);
 
-        def updateTop(fn: Frame -> Frame): Unit \ rc = {
-            match Ref.get(stack) {
-                case top :: rest => Ref.put(fn(top) :: rest, stack)
-                case Nil         => ()
-            }
-        };
+        def flushOpenTag(pushIfNonVoid: Bool): Unit \ rc =
+            match Ref.get(openTagName) {
+                case None => ()
+                case Some(tag) =>
+                    StringBuilder.append('<', out);
+                    StringBuilder.appendString(tag, out);
+
+                    // Emit merged `class` attribute (fast path for 0 or 1 class)
+                    match Ref.get(openClasses) {
+                        case Nil => ()
+                        case single :: Nil =>
+                            StringBuilder.appendString(" class=\"", out);
+                            appendEscaped(single, out);
+                            StringBuilder.append('"', out)
+                        case many =>
+                            StringBuilder.appendString(" class=\"", out);
+                            appendJoinedClasses(List.reverse(many), true, out);
+                            StringBuilder.append('"', out)
+                    };
+
+                    // Emit remaining attributes in insertion order (fast path for 0 or 1 attr)
+                    match Ref.get(openAttrs) {
+                        case Nil => ()
+                        case (attrName, vOpt) :: Nil =>
+                            appendAttr(attrName, vOpt, out)
+                        case many =>
+                            List.forEach(match (attrName, vOpt) -> appendAttr(attrName, vOpt, out), List.reverse(many))
+                    };
+
+                    StringBuilder.append('>', out);
+
+                    if (pushIfNonVoid and not Ref.get(openIsVoid))
+                        Ref.transform(s -> tag :: s, closedTagStack)
+                    else ();
+
+                    Ref.put(None, openTagName);
+                    Ref.put(false, openIsVoid);
+                    Ref.put(Nil, openClasses);
+                    Ref.put(Nil, openAttrs)
+            };
 
         run {
             f()
         } with handler Html {
             def openTag(tag, isVoid, k) = {
-                let frame: Frame = {
-                    tag      = tag,
-                    isVoid   = isVoid,
-                    classes  = Nil,
-                    attrs    = Nil,
-                    children = Nil
-                };
-                Ref.transform(s -> frame :: s, stack);
+                flushOpenTag(true);
+                Ref.put(Some(tag), openTagName);
+                Ref.put(isVoid, openIsVoid);
                 k()
             }
             def closeTag(k) = {
-                match Ref.get(stack) {
-                    case top :: parent :: rest =>
-                        let rendered = renderFrame(top);
-                        let updatedParent = { children = rendered :: parent#children | parent };
-                        Ref.put(updatedParent :: rest, stack)
-                    case _ =>
-                        ()
+                match Ref.get(openTagName) {
+                    case Some(tag) =>
+                        let isVoid = Ref.get(openIsVoid);
+                        flushOpenTag(false);
+                        if (not isVoid) {
+                            StringBuilder.appendString("</", out);
+                            StringBuilder.appendString(tag, out);
+                            StringBuilder.append('>', out)
+                        } else ()
+                    case None =>
+                        match Ref.get(closedTagStack) {
+                            case tag :: rest =>
+                                Ref.put(rest, closedTagStack);
+                                StringBuilder.appendString("</", out);
+                                StringBuilder.appendString(tag, out);
+                                StringBuilder.append('>', out)
+                            case Nil => ()
+                        }
                 };
                 k()
             }
@@ -104,39 +137,44 @@ pub mod Weft.Html {
                         case Some(c) =>
                             let trimmed = String.trim(c);
                             if (not String.isEmpty(trimmed))
-                                updateTop(fr -> { classes = trimmed :: fr#classes | fr })
+                                Ref.transform(cs -> trimmed :: cs, openClasses)
                             else
                                 ()
                         case None => ()
                     }
                 } else {
-                    updateTop(fr -> { attrs = (name, valOpt) :: fr#attrs | fr })
+                    Ref.transform(xs -> (name, valOpt) :: xs, openAttrs)
                 };
                 k()
             }
             def addClass(className, k) = {
                 let trimmed = String.trim(className);
                 if (not String.isEmpty(trimmed))
-                    updateTop(fr -> { classes = trimmed :: fr#classes | fr })
+                    Ref.transform(cs -> trimmed :: cs, openClasses)
                 else
                     ();
                 k()
             }
             def addText(content, k) = {
-                let escaped = escapeHtml(content);
-                updateTop(fr -> { children = escaped :: fr#children | fr });
+                flushOpenTag(true);
+                appendEscaped(content, out);
                 k()
             }
             def addRaw(content, k) = {
-                updateTop(fr -> { children = content :: fr#children | fr });
+                flushOpenTag(true);
+                StringBuilder.appendString(content, out);
                 k()
             }
         };
 
-        // Flush any unclosed frames safely, then join root children in order
-        let finalFrames = Ref.get(stack);
-        let root = flushStack(finalFrames);
-        joinStrings(List.reverse(root#children))
+        // Flush any unclosed open tag and close any remaining open ancestors safely
+        flushOpenTag(true);
+        List.forEach(tag -> {
+            StringBuilder.appendString("</", out);
+            StringBuilder.appendString(tag, out);
+            StringBuilder.append('>', out)
+        }, Ref.get(closedTagStack));
+        StringBuilder.toString(out)
     }
 
     ///
@@ -162,18 +200,17 @@ pub mod Weft.Html {
         extraHead: Unit -> Unit \ ef1,
         bodyContent: Unit -> Unit \ ef2
     ): HtmlDoc \ (ef1 + ef2 - Html) =
-        document(() ->
-            html(() -> {
-                lang("en");
-                head(() -> {
-                    metaCharset("utf-8");
-                    metaViewport();
-                    titleText(pageTitle);
-                    extraHead()
-                });
-                body(bodyContent)
-            })
-        )
+        render(() -> {
+            Html.addRaw(
+                "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>" +
+                escapeHtml(pageTitle) +
+                "</title>"
+            );
+            extraHead();
+            Html.addRaw("</head><body>");
+            bodyContent();
+            Html.addRaw("</body></html>")
+        })
 
     // --- Core Primitives & Control-Flow Helpers ---
 
@@ -217,7 +254,7 @@ pub mod Weft.Html {
     /// Emits a non-void element containing only escaped text: `<tag>escaped(s)</tag>`.
     ///
     pub def elText(tag: String, content: String): Unit \ Html =
-        el(tag, () -> text(content))
+        Html.addRaw("<" + tag + ">" + escapeHtml(content) + "</" + tag + ">")
 
     ///
     /// Iterates over `xs` in order, invoking `f` for each element.
@@ -408,8 +445,8 @@ pub mod Weft.Html {
     pub def imgEl(attrs: Unit -> Unit \ ef): Unit \ ef + Html  = voidEl("img", attrs)
     pub def linkTag(attrs: Unit -> Unit \ ef): Unit \ ef + Html = voidEl("link", attrs)
     pub def metaTag(attrs: Unit -> Unit \ ef): Unit \ ef + Html = voidEl("meta", attrs)
-    pub def br(): Unit \ Html                                  = voidEl("br", () -> ())
-    pub def hr(): Unit \ Html                                  = voidEl("hr", () -> ())
+    pub def br(): Unit \ Html                                  = Html.addRaw("<br>")
+    pub def hr(): Unit \ Html                                  = Html.addRaw("<hr>")
 
     // --- Ergonomic One-Liner Shorthands ---
 
@@ -430,59 +467,90 @@ pub mod Weft.Html {
     /// Emits `<a href="...">escaped(label)</a>`.
     ///
     pub def link(url: String, labelText: String): Unit \ Html =
-        a(() -> { href(url); text(labelText) })
+        Html.addRaw("<a href=\"" + escapeHtml(url) + "\">" + escapeHtml(labelText) + "</a>")
 
     ///
     /// Emits `<img src="..." alt="...">`.
     ///
     pub def img(imgSrc: String, imgAlt: String): Unit \ Html =
-        imgEl(() -> { src(imgSrc); alt(imgAlt) })
+        Html.addRaw("<img src=\"" + escapeHtml(imgSrc) + "\" alt=\"" + escapeHtml(imgAlt) + "\">")
 
     ///
     /// Emits `<meta charset="...">`.
     ///
     pub def metaCharset(charset: String): Unit \ Html =
-        metaTag(() -> attr("charset", charset))
+        Html.addRaw("<meta charset=\"" + escapeHtml(charset) + "\">")
 
     ///
     /// Emits `<meta name="viewport" content="width=device-width, initial-scale=1">`.
     ///
     pub def metaViewport(): Unit \ Html =
-        meta("viewport", "width=device-width, initial-scale=1")
+        Html.addRaw("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">")
 
     ///
     /// Emits `<meta name="..." content="...">`.
     ///
     pub def meta(metaName: String, content: String): Unit \ Html =
-        metaTag(() -> { name(metaName); attr("content", content) })
+        Html.addRaw("<meta name=\"" + escapeHtml(metaName) + "\" content=\"" + escapeHtml(content) + "\">")
 
     ///
     /// Emits `<link rel="stylesheet" href="...">`.
     ///
     pub def stylesheet(url: String): Unit \ Html =
-        linkTag(() -> { rel("stylesheet"); href(url) })
+        Html.addRaw("<link rel=\"stylesheet\" href=\"" + escapeHtml(url) + "\">")
 
     ///
     /// Emits `<script src="..." defer></script>`.
     ///
     pub def scriptSrc(url: String): Unit \ Html =
-        script(() -> { src(url); defer() })
+        Html.addRaw("<script src=\"" + escapeHtml(url) + "\" defer></script>")
 
     ///
     /// Emits `<style>rawCss</style>`.
     ///
     pub def inlineStyle(css: String): Unit \ Html =
-        style(() -> raw(css))
+        Html.addRaw("<style>" + css + "</style>")
 
-    // --- Escaping & Internal Frame Rendering ---
+    // --- Escaping & Internal Streaming Helpers ---
 
     ///
     /// Escapes `&`, `<`, `>`, `"`, and `'` for safe HTML text and attribute rendering.
+    /// Zero-allocation fast path when no special characters are present.
     ///
-    pub def escapeHtml(s: String): String = region rc {
-        let sb = StringBuilder.empty(rc);
+    pub def escapeHtml(s: String): String =
+        if (not needsEscape(s))
+            s
+        else
+            region rc {
+                let sb = StringBuilder.empty(rc);
+                appendEscapedSlow(s, sb);
+                StringBuilder.toString(sb)
+            }
+
+    def needsEscape(s: String): Bool = {
         let len = String.length(s);
-        def loop(i) = {
+        def loop(i) =
+            if (i >= len)
+                false
+            else {
+                let c = String.charAt(i, s);
+                if (c == '&' or c == '<' or c == '>' or c == '"' or c == '\'')
+                    true
+                else
+                    loop(i + 1)
+            };
+        loop(0)
+    }
+
+    def appendEscaped(s: String, sb: StringBuilder[r]): Unit \ r =
+        if (not needsEscape(s))
+            StringBuilder.appendString(s, sb)
+        else
+            appendEscapedSlow(s, sb)
+
+    def appendEscapedSlow(s: String, sb: StringBuilder[r]): Unit \ r = {
+        let len = String.length(s);
+        def loop(i) =
             if (i >= len)
                 ()
             else {
@@ -495,65 +563,28 @@ pub mod Weft.Html {
                     case c    => StringBuilder.append(c, sb)
                 };
                 loop(i + 1)
-            }
-        };
-        loop(0);
-        StringBuilder.toString(sb)
+            };
+        loop(0)
     }
 
-    def renderFrame(fr: Frame): String = region rc {
-        let sb = StringBuilder.empty(rc);
-        StringBuilder.append('<', sb);
-        StringBuilder.appendString(fr#tag, sb);
-
-        // Emit merged `class` attribute if any classes were attached
-        let orderedClasses = List.reverse(fr#classes);
-        if (not List.isEmpty(orderedClasses)) {
-            StringBuilder.appendString(" class=\"", sb);
-            StringBuilder.appendString(escapeHtml(String.intercalate(" ", orderedClasses)), sb);
-            StringBuilder.append('"', sb)
-        } else ();
-
-        // Emit remaining attributes in insertion order
-        List.forEach(match (k, vOpt) -> {
-            StringBuilder.append(' ', sb);
-            StringBuilder.appendString(k, sb);
-            match vOpt {
-                case None => ()
-                case Some(v) =>
-                    StringBuilder.appendString("=\"", sb);
-                    StringBuilder.appendString(escapeHtml(v), sb);
-                    StringBuilder.append('"', sb)
-            }
-        }, List.reverse(fr#attrs));
-
-        StringBuilder.append('>', sb);
-
-        if (not fr#isVoid) {
-            List.forEach(chunk -> StringBuilder.appendString(chunk, sb), List.reverse(fr#children));
-            StringBuilder.appendString("</", sb);
-            StringBuilder.appendString(fr#tag, sb);
-            StringBuilder.append('>', sb)
-        } else ();
-
-        StringBuilder.toString(sb)
+    def appendJoinedClasses(xs: List[String], isFirst: Bool, sb: StringBuilder[r]): Unit \ r = match xs {
+        case Nil => ()
+        case c :: rest =>
+            if (not isFirst) StringBuilder.append(' ', sb) else ();
+            appendEscaped(c, sb);
+            appendJoinedClasses(rest, false, sb)
     }
 
-    def flushStack(frames: List[Frame]): Frame = match frames {
-        case single :: Nil =>
-            single
-        case top :: parent :: rest =>
-            let rendered = renderFrame(top);
-            let updatedParent = { children = rendered :: parent#children | parent };
-            flushStack(updatedParent :: rest)
-        case Nil =>
-            { tag = "", isVoid = false, classes = Nil, attrs = Nil, children = Nil }
-    }
-
-    def joinStrings(xs: List[String]): String = region rc {
-        let sb = StringBuilder.empty(rc);
-        List.forEach(s -> StringBuilder.appendString(s, sb), xs);
-        StringBuilder.toString(sb)
+    def appendAttr(attrName: String, vOpt: Option[String], sb: StringBuilder[r]): Unit \ r = {
+        StringBuilder.append(' ', sb);
+        StringBuilder.appendString(attrName, sb);
+        match vOpt {
+            case None => ()
+            case Some(v) =>
+                StringBuilder.appendString("=\"", sb);
+                appendEscaped(v, sb);
+                StringBuilder.append('"', sb)
+        }
     }
 
 }

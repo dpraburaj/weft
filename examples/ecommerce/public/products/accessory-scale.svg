@@ -1,0 +1,11 @@
+<svg viewBox="0 0 320 240" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Barista Flow-Rate Digital Scale">
+  <rect width="320" height="240" fill="#eceae5"/>
+  <line x1="32" y1="204" x2="288" y2="204" stroke="#dcd8ce" stroke-width="1"/>
+  <g stroke="#171614" stroke-width="1.5" fill="none">
+    <rect x="76" y="70" width="168" height="124" rx="4" fill="#1d1c1a"/>
+    <rect x="88" y="82" width="144" height="78" rx="2" fill="#2a2926" stroke="#3f3d39"/>
+    <text x="102" y="181" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="13" fill="#f6f4ef" stroke="none">01:42</text>
+    <text x="174" y="181" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="13" fill="#d97706" stroke="none">240.0g</text>
+  </g>
+  <text x="24" y="222" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="8.5" letter-spacing="1" fill="#6b665d">0.1G PRECISION</text>
+</svg>
