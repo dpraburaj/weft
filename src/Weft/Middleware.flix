@@ -2,6 +2,7 @@ pub mod Weft.Middleware {
     use Weft.Accept
     use Weft.App
     use Weft.Auth
+    use Weft.Body
     use Weft.Compression
     use Weft.CompressionConfig
     use Weft.CorsConfig
@@ -450,15 +451,16 @@ pub mod Weft.Middleware {
         else if (not Compression.isCompressibleContentType(Response.header("Content-Type", res)))
             res
         else {
-            let rawBytes = Response.bodyBytes(res);
-            let rawLen = Vector.length(rawBytes);
-            if (rawLen < CompressionConfig.minBytes(cfg))
+            let minB = CompressionConfig.minBytes(cfg);
+            if (not Body.meetsMinBytes(minB, Response.bodyValue(res)))
                 res
             else {
                 match Compression.negotiateEncoding(cfg, Request.header("Accept-Encoding", req)) {
                     case None =>
                         appendVaryAcceptEncoding(res)
                     case Some(enc) =>
+                        let rawBytes = Response.bodyBytes(res);
+                        let rawLen = Vector.length(rawBytes);
                         let compressed = if (enc == "gzip")
                             Compression.gzip(rawBytes)
                         else

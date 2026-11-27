@@ -1,17 +1,17 @@
 mod Features.Cart.CartViews {
     use Shared.Domain.{CartLine, CartSummary}
     use weft::Weft.Csrf
-    use weft::Weft.Html
-    use weft::Weft.Html.{
-        a, action, attr, button, cls, div, each, form, h1Text, h2Text, h3, href,
-        hxDelete, hxPost, hxSwap, hxTarget, id, input, link, method, name, p,
-        pText, placeholder, raw, spanText, strongText, table, tbody, td, tdText,
-        text, thText, thead, tr, type_, value, when, whenSome
-    }
     use weft::Weft.HtmlDoc
     use weft::Weft.Principal
     use weft::Weft.Random
     use weft::Weft.Session
+    use weft::Weft.View
+    use weft::Weft.View.{
+        a, action, attr, button, cls, div, each, form, frag, h1Text, h2Text,
+        h3, href, hxDelete, hxPost, hxSwap, hxTarget, id, input, link, method,
+        name, p, placeholder, spanText, strongText, table, tbody, td, tdText,
+        text, thText, thead, tr, type_, value, when, whenSome
+    }
 
     pub def cartPage(
         userOpt: Option[Principal],
@@ -20,15 +20,14 @@ mod Features.Cart.CartViews {
         flashErr: Option[String]
     ): HtmlDoc \ {Session, Random} = {
         let csrfTok = Csrf.token();
-        let panelHtml = renderCartPanelHtml(csrfTok, summary, None, None, false);
-        let bodyHtml = Html.renderString(() -> {
-            h1Text("Your Cart");
-            div(() -> {
-                id("cart-panel");
-                raw(panelHtml)
+        let bodyView = frag(Vector#{
+            h1Text("Your Cart"),
+            div(Vector#{
+                id("cart-panel"),
+                renderCartPanel(csrfTok, summary, None, None, false)
             })
         });
-        Shared.Layout.renderShell("Your Cart", csrfTok, userOpt, summary#itemCount, flashOk, flashErr, bodyHtml)
+        Shared.Layout.renderShell("Your Cart", csrfTok, userOpt, summary#itemCount, flashOk, flashErr, bodyView)
     }
 
     pub def cartPanelPartial(
@@ -37,153 +36,150 @@ mod Features.Cart.CartViews {
         noticeErr: Option[String]
     ): HtmlDoc \ {Session, Random} = {
         let csrfTok = Csrf.token();
-        Html.render(() -> raw(renderCartPanelHtml(csrfTok, summary, noticeOk, noticeErr, true)))
+        View.render(renderCartPanel(csrfTok, summary, noticeOk, noticeErr, true))
     }
 
-    // --- Pure HTML Sections (split to keep JVM method frames compact) ---
+    // --- Pure View Sections ---
 
-    def renderCartPanelHtml(
+    def renderCartPanel(
         csrfTok: String,
         summary: CartSummary,
         noticeOk: Option[String],
         noticeErr: Option[String],
         includeOobBadge: Bool
-    ): String = {
-        let leftHtml = Html.renderString(() -> renderCartLinesPanel(csrfTok, summary#lines));
-        let rightHtml = Html.renderString(() -> renderCartSummaryPanel(csrfTok, summary));
-        Html.renderString(() -> {
-            when(includeOobBadge, () -> Shared.Layout.cartBadgeSpan(summary#itemCount, true));
-            whenSome(noticeOk, msg -> div(() -> { cls("flash flash-ok"); text(msg) }));
-            whenSome(noticeErr, msg -> div(() -> { cls("flash flash-err"); text(msg) }));
+    ): View =
+        frag(Vector#{
+            when(includeOobBadge, Shared.Layout.cartBadgeSpan(summary#itemCount, true)),
+            whenSome(noticeOk, msg -> div(Vector#{ cls("flash flash-ok"), text(msg) })),
+            whenSome(noticeErr, msg -> div(Vector#{ cls("flash flash-err"), text(msg) })),
             if (List.isEmpty(summary#lines)) {
-                div(() -> {
-                    cls("panel");
-                    h3(() -> text("Your cart is empty"));
-                    p(() -> { cls("muted"); text("Explore our freshly roasted coffee and brewing gear.") });
-                    a(() -> { cls("btn"); href("/"); text("Browse Catalog") })
+                div(Vector#{
+                    cls("panel"),
+                    h3(Vector#{ text("Your cart is empty") }),
+                    p(Vector#{ cls("muted"), text("Explore our freshly roasted coffee and brewing gear.") }),
+                    a(Vector#{ cls("btn"), href("/"), text("Browse Catalog") })
                 })
             } else {
-                div(() -> {
-                    cls("two-col");
-                    raw(leftHtml);
-                    raw(rightHtml)
+                div(Vector#{
+                    cls("two-col"),
+                    renderCartLinesPanel(csrfTok, summary#lines),
+                    renderCartSummaryPanel(csrfTok, summary)
                 })
             }
         })
-    }
 
-    def renderCartLinesPanel(csrfTok: String, lines: List[CartLine]): Unit \ Html =
-        div(() -> {
-            cls("panel");
-            table(() -> {
-                thead(() -> tr(() -> {
-                    thText("Item");
-                    thText("Unit Price");
-                    thText("Quantity");
-                    thText("Subtotal");
+    def renderCartLinesPanel(csrfTok: String, lines: List[CartLine]): View =
+        div(Vector#{
+            cls("panel"),
+            table(Vector#{
+                thead(Vector#{ tr(Vector#{
+                    thText("Item"),
+                    thText("Unit Price"),
+                    thText("Quantity"),
+                    thText("Subtotal"),
                     thText("")
-                }));
-                tbody(() -> each(lines, line -> renderCartRow(csrfTok, line)))
+                }) }),
+                tbody(Vector#{ each(lines, line -> renderCartRow(csrfTok, line)) })
             })
         })
 
-    def renderCartRow(csrfTok: String, line: CartLine): Unit \ Html =
-        tr(() -> {
-            td(() -> {
-                link("/products/${line#slug}", line#name);
-                div(() -> { cls("muted"); attr("style", "font-size:0.8rem"); text("SKU: ${line#sku}") })
-            });
-            tdText(Shared.Money.formatCents(line#unitCents));
-            td(() ->
-                div(() -> {
-                    cls("qty-box");
-                    form(() -> {
-                        method("post");
-                        action("/cart/items/${line#productId}/qty");
-                        hxPost("/cart/items/${line#productId}/qty");
-                        hxTarget("#cart-panel");
-                        hxSwap("innerHTML");
-                        Shared.Layout.csrfInput(csrfTok);
-                        input(() -> { type_("hidden"); name("quantity"); value("${line#quantity - 1}") });
-                        button(() -> { cls("btn-secondary btn-sm"); type_("submit"); text("−") })
-                    });
-                    strongText("${line#quantity}");
-                    form(() -> {
-                        method("post");
-                        action("/cart/items/${line#productId}/qty");
-                        hxPost("/cart/items/${line#productId}/qty");
-                        hxTarget("#cart-panel");
-                        hxSwap("innerHTML");
-                        Shared.Layout.csrfInput(csrfTok);
-                        input(() -> { type_("hidden"); name("quantity"); value("${line#quantity + 1}") });
-                        button(() -> { cls("btn-secondary btn-sm"); type_("submit"); text("+") })
+    def renderCartRow(csrfTok: String, line: CartLine): View =
+        tr(Vector#{
+            td(Vector#{
+                link("/products/${line#slug}", line#name),
+                div(Vector#{ cls("muted"), attr("style", "font-size:0.8rem"), text("SKU: ${line#sku}") })
+            }),
+            tdText(Shared.Money.formatCents(line#unitCents)),
+            td(Vector#{
+                div(Vector#{
+                    cls("qty-box"),
+                    form(Vector#{
+                        method("post"),
+                        action("/cart/items/${line#productId}/qty"),
+                        hxPost("/cart/items/${line#productId}/qty"),
+                        hxTarget("#cart-panel"),
+                        hxSwap("innerHTML"),
+                        Shared.Layout.csrfInput(csrfTok),
+                        input(Vector#{ type_("hidden"), name("quantity"), value("${line#quantity - 1}") }),
+                        button(Vector#{ cls("btn-secondary btn-sm"), type_("submit"), text("−") })
+                    }),
+                    strongText("${line#quantity}"),
+                    form(Vector#{
+                        method("post"),
+                        action("/cart/items/${line#productId}/qty"),
+                        hxPost("/cart/items/${line#productId}/qty"),
+                        hxTarget("#cart-panel"),
+                        hxSwap("innerHTML"),
+                        Shared.Layout.csrfInput(csrfTok),
+                        input(Vector#{ type_("hidden"), name("quantity"), value("${line#quantity + 1}") }),
+                        button(Vector#{ cls("btn-secondary btn-sm"), type_("submit"), text("+") })
                     })
                 })
-            );
-            td(() -> strongText(Shared.Money.formatCents(line#lineTotalCents)));
-            td(() ->
-                form(() -> {
-                    method("post");
-                    action("/cart/items/${line#productId}/remove");
-                    hxDelete("/cart/items/${line#productId}");
-                    hxTarget("#cart-panel");
-                    hxSwap("innerHTML");
-                    Shared.Layout.csrfInput(csrfTok);
-                    button(() -> { cls("btn-danger btn-sm"); type_("submit"); text("Remove") })
+            }),
+            td(Vector#{ strongText(Shared.Money.formatCents(line#lineTotalCents)) }),
+            td(Vector#{
+                form(Vector#{
+                    method("post"),
+                    action("/cart/items/${line#productId}/remove"),
+                    hxDelete("/cart/items/${line#productId}"),
+                    hxTarget("#cart-panel"),
+                    hxSwap("innerHTML"),
+                    Shared.Layout.csrfInput(csrfTok),
+                    button(Vector#{ cls("btn-danger btn-sm"), type_("submit"), text("Remove") })
                 })
-            )
+            })
         })
 
-    def renderCartSummaryPanel(csrfTok: String, summary: CartSummary): Unit \ Html =
-        div(() -> {
-            cls("panel");
-            h2Text("Order Summary");
-            div(() -> {
-                cls("summary-line");
-                spanText("Subtotal (${summary#itemCount} items)");
+    def renderCartSummaryPanel(csrfTok: String, summary: CartSummary): View =
+        div(Vector#{
+            cls("panel"),
+            h2Text("Order Summary"),
+            div(Vector#{
+                cls("summary-line"),
+                spanText("Subtotal (${summary#itemCount} items)"),
                 spanText(Shared.Money.formatCents(summary#subtotalCents))
-            });
-            when(summary#discountCents > 0i64, () ->
-                div(() -> {
-                    cls("summary-line");
-                    spanText("Promo Discount");
+            }),
+            when(summary#discountCents > 0i64,
+                div(Vector#{
+                    cls("summary-line"),
+                    spanText("Promo Discount"),
                     spanText("-" + Shared.Money.formatCents(summary#discountCents))
                 })
-            );
-            div(() -> {
-                cls("summary-line");
-                spanText("Shipping");
+            ),
+            div(Vector#{
+                cls("summary-line"),
+                spanText("Shipping"),
                 spanText(if (summary#shippingCents == 0i64) "FREE" else Shared.Money.formatCents(summary#shippingCents))
-            });
-            div(() -> {
-                cls("summary-line summary-total");
-                spanText("Total");
+            }),
+            div(Vector#{
+                cls("summary-line summary-total"),
+                spanText("Total"),
                 spanText(Shared.Money.formatCents(summary#totalCents))
-            });
-            form(() -> {
-                method("post");
-                action("/cart/promo");
-                hxPost("/cart/promo");
-                hxTarget("#cart-panel");
-                hxSwap("innerHTML");
-                attr("style", "margin:1rem 0;display:flex;gap:0.5rem");
-                Shared.Layout.csrfInput(csrfTok);
-                input(() -> {
-                    type_("text");
-                    name("code");
-                    placeholder("Promo code (WELCOME10)");
-                    value(match summary#promo { case Some(pr) => pr#code case None => "" });
+            }),
+            form(Vector#{
+                method("post"),
+                action("/cart/promo"),
+                hxPost("/cart/promo"),
+                hxTarget("#cart-panel"),
+                hxSwap("innerHTML"),
+                attr("style", "margin:1rem 0;display:flex;gap:0.5rem"),
+                Shared.Layout.csrfInput(csrfTok),
+                input(Vector#{
+                    type_("text"),
+                    name("code"),
+                    placeholder("Promo code (WELCOME10)"),
+                    value(match summary#promo { case Some(pr) => pr#code case None => "" }),
                     attr("style", "flex:1")
-                });
-                button(() -> { cls("btn-secondary btn-sm"); type_("submit"); text("Apply") })
-            });
+                }),
+                button(Vector#{ cls("btn-secondary btn-sm"), type_("submit"), text("Apply") })
+            }),
             whenSome(summary#promo, pr ->
-                p(() -> { cls("muted"); attr("style", "font-size:0.85rem"); text("Applied: ${pr#code} — ${pr#description}") })
-            );
-            a(() -> {
-                cls("btn");
-                href("/checkout");
-                attr("style", "width:100%;margin-top:0.5rem");
+                p(Vector#{ cls("muted"), attr("style", "font-size:0.85rem"), text("Applied: ${pr#code} — ${pr#description}") })
+            ),
+            a(Vector#{
+                cls("btn"),
+                href("/checkout"),
+                attr("style", "width:100%;margin-top:0.5rem"),
                 text("Proceed to Checkout")
             })
         })

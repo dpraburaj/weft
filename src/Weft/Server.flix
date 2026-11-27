@@ -26,6 +26,7 @@ pub mod Weft.Server {
     import java.lang.Runtime
     import java.lang.Thread
     import java.net.InetSocketAddress
+    import java.nio.charset.StandardCharsets
     import java.util.concurrent.CountDownLatch
     import java.util.concurrent.Executors
     import java.util.concurrent.TimeUnit
@@ -269,44 +270,53 @@ pub mod Weft.Server {
         maxBodyBytes: Int32,
         readTimeoutMs: Int64,
         exchange: HttpExchange
-    ): Result[ReadError, Request] \ IO =
-        match runWithTimeout(readTimeoutMs, () -> readRequest(maxBodyBytes, exchange)) {
-            case TimedOutcome.Completed(res) => res
-            case TimedOutcome.TimedOut       => Err(ReadError.ReadTimeout)
-            case TimedOutcome.Failed(msg)    => Err(ReadError.ReadFailed(msg))
-        }
-
-    def readRequest(maxBodyBytes: Int32, exchange: HttpExchange): Result[ReadError, Request] \ IO =
+    ): Result[ReadError, Request] \ IO = {
         let method = Method.parse(exchange.getRequestMethod());
         let uri = exchange.getRequestURI();
         let rawPath = uri.getRawPath();
         let rawQueryObj = uri.getRawQuery();
         let fullRawPath = if (Object.isNull(rawQueryObj)) rawPath else "${rawPath}?${rawQueryObj}";
-        let jHeaders = exchange.getRequestHeaders();
-        let flixHeaders = readHeaders(jHeaders);
+        let flixHeaders = readHeaders(exchange.getRequestHeaders());
+        let contentLenOpt = match Headers.get("Content-Length", flixHeaders) {
+            case Some(clStr) => Int64.fromString(String.trim(clStr))
+            case None        => None
+        };
+        let hasTransferEnc = Option.nonEmpty(Headers.get("Transfer-Encoding", flixHeaders));
         let declaredTooLarge = if (maxBodyBytes > 0) {
-            match Headers.get("Content-Length", flixHeaders) {
-                case Some(clStr) => match Int64.fromString(String.trim(clStr)) {
-                    case Some(cl) => cl > Int32.toInt64(maxBodyBytes)
-                    case None     => false
-                }
-                case None => false
+            match contentLenOpt {
+                case Some(cl) => cl > Int32.toInt64(maxBodyBytes)
+                case None     => false
             }
         } else {
             false
         };
         if (declaredTooLarge)
             Err(ReadError.TooLarge("Request body exceeds maximum allowed size of ${maxBodyBytes} bytes"))
-        else
-            match readBoundedBytes(exchange.getRequestBody(), maxBodyBytes) {
-                case Err(msg) => Err(ReadError.TooLarge(msg))
-                case Ok(bodyVec) =>
-                    Ok(
-                        Request.make(method, fullRawPath)
-                            |> Request.withHeaders(flixHeaders)
-                            |> Request.withBytes(bodyVec)
-                    )
+        else {
+            let hasBody = hasTransferEnc or match contentLenOpt {
+                case Some(cl) => cl > 0i64
+                case None     => false
+            };
+            if (not hasBody) {
+                Ok(
+                    Request.make(method, fullRawPath)
+                        |> Request.withHeaders(flixHeaders)
+                )
+            } else {
+                match runWithTimeout(readTimeoutMs, () -> readBoundedBytes(exchange.getRequestBody(), maxBodyBytes)) {
+                    case TimedOutcome.Completed(Ok(bodyVec)) =>
+                        Ok(
+                            Request.make(method, fullRawPath)
+                                |> Request.withHeaders(flixHeaders)
+                                |> Request.withBytes(bodyVec)
+                        )
+                    case TimedOutcome.Completed(Err(msg)) => Err(ReadError.TooLarge(msg))
+                    case TimedOutcome.TimedOut           => Err(ReadError.ReadTimeout)
+                    case TimedOutcome.Failed(msg)        => Err(ReadError.ReadFailed(msg))
+                }
             }
+        }
+    }
 
     def readBoundedBytes(stream: InputStream, maxBodyBytes: Int32): Result[String, Vector[Int8]] \ IO =
         if (maxBodyBytes <= 0) {
@@ -386,8 +396,21 @@ pub mod Weft.Server {
                         case _: Exception =>
                             try { out.close() } catch { case _: Exception => () }
                     }
-                case _ =>
-                    let bodyVec = Response.bodyBytes(res);
+                case Body.Empty =>
+                    exchange.sendResponseHeaders(statusCode, -1i64);
+                    exchange.close()
+                case Body.Text(s) =>
+                    if (String.isEmpty(s)) {
+                        exchange.sendResponseHeaders(statusCode, -1i64);
+                        exchange.close()
+                    } else {
+                        let bodyBytes = s.getBytes(StandardCharsets.UTF_8);
+                        exchange.sendResponseHeaders(statusCode, Int32.toInt64(Array.length(bodyBytes)));
+                        let out = exchange.getResponseBody();
+                        out.write(bodyBytes);
+                        out.close()
+                    }
+                case Body.Bytes(bodyVec) =>
                     let len = Vector.length(bodyVec);
                     if (len == 0) {
                         exchange.sendResponseHeaders(statusCode, -1i64);

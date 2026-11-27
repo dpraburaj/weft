@@ -4,6 +4,7 @@ pub mod Weft.ValidationErrors {
     use Weft.Response
     use Weft.Status
     use Weft.ValidationErrors
+    use Weft.View
 
     ///
     /// Immutable collection of field-keyed validation errors (`field -> List[message]`).
@@ -109,6 +110,19 @@ pub mod Weft.ValidationErrors {
                 Html.cls("field-error");
                 Html.role("alert");
                 Html.text(msg)
+            })
+        )
+
+    ///
+    /// Returns a pure `Weft.View` node for the first error on `field`
+    /// (`<p class="field-error" role="alert">...</p>`) or `View.Empty` when absent.
+    ///
+    pub def fieldErrorView(field: String, e: ValidationErrors): View =
+        View.whenSome(firstForField(field, e), msg ->
+            View.p(Vector#{
+                View.cls("field-error"),
+                View.role("alert"),
+                View.text(msg)
             })
         )
 

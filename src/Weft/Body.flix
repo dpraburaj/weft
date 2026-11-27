@@ -98,10 +98,30 @@ pub mod Weft.Body {
     ///
     pub def byteLength(b: Body): Int32 = match b {
         case Body.Empty     => 0
-        case Body.Text(s)   => Vector.length(utf8Bytes(s))
+        case Body.Text(s)   =>
+            if (String.isEmpty(s)) 0
+            else unsafe IO { Array.length(s.getBytes(StandardCharsets.UTF_8)) }
         case Body.Bytes(bs) => Vector.length(bs)
         case Body.Stream(_) => -1
     }
+
+    ///
+    /// Fast-path check for whether a non-streaming body is at least `minBytes` UTF-8 bytes
+    /// long without encoding `Body.Text` when character count alone decides the result.
+    ///
+    pub def meetsMinBytes(minBytes: Int32, b: Body): Bool =
+        if (minBytes <= 0)
+            not isStream(b)
+        else match b {
+            case Body.Empty     => false
+            case Body.Stream(_) => false
+            case Body.Bytes(bs) => Vector.length(bs) >= minBytes
+            case Body.Text(s)   =>
+                let chars = String.length(s);
+                if (chars >= minBytes) true
+                else if (chars * 4 < minBytes) false
+                else byteLength(b) >= minBytes
+        }
 
     ///
     /// Decodes a non-streaming body as a UTF-8 `String` (returns `""` for `Body.Stream`;
