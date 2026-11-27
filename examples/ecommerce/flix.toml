@@ -1,0 +1,7 @@
+[package]
+version    = "0.1.0"
+repository = "github:dpraburaj/weft-example-ecommerce"
+flix       = "0.80.0"
+
+[dependencies]
+"github:dpraburaj/weft" = { version = "0.7.0", mount = "weft", security = "unrestricted" }

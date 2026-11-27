@@ -11,6 +11,7 @@ Each directory below is a standalone Flix project demonstrating a different slic
 | [`sqlite-notes`](sqlite-notes/) | Persistent REST API backed by embedded SQLite, forward-only `Migration.runAll`, `Db.transactionHttp` atomic batch rollback on `HttpError`/`DbError`, `Middleware.dbErrorToHttp` (`409 Conflict`), CORS, security headers, and RBAC. |
 | [`background-jobs`](background-jobs/) | HTTP API dispatching immediate & delayed jobs via `JobQueue`, Java 21 virtual-thread `JobWorker` pool, exponential backoff retries via `JobError`, and deterministic zero-sleep pure worker tests with `JobStore.runPure` & `TestEffects.runManualClock`. |
 | [`html-ssr`](html-ssr/) | Ergonomic server-rendered HTML with the `Weft.Html` algebraic-effect builder (`Html.pageWithHead`, `clsIf`, `each`, `whenSome`), form handling, `Middleware.errorHtml`, and pure zero-IO SSR tests. |
+| [`ecommerce`](ecommerce/) | Full real-world **Weft Roasters** e-commerce store: SSR HTML + HTMX live catalog search/filter/pagination (`SqlBuilder`/`Page`), HTMX cart + promo codes, SQLite sessions/CSRF/PBKDF2 auth + guest cart merge, `Validate` checkout, atomic stock decrement + transactional outbox `JobWorker`, admin RBAC + multipart binary image uploads, static assets, JSON API, and `TestSession` E2E tests. |
 
 ## Running Any Example
 

@@ -204,6 +204,7 @@ Complete, runnable Flix projects live in [`examples/`](examples/README.md):
 - [`examples/sqlite-notes`](examples/sqlite-notes/) — Persistent SQLite REST API, migrations, `Db.transactionHttp` atomic batch rollback, and `409 Conflict` mapping
 - [`examples/background-jobs`](examples/background-jobs/) — HTTP API + Java 21 virtual-thread `JobWorker`, delayed jobs, exponential backoff retries, and deterministic clock-driven tests
 - [`examples/html-ssr`](examples/html-ssr/) — Server-rendered HTML with the `Weft.Html` algebraic-effect builder, form handling, `Middleware.errorHtml`, and pure SSR tests
+- [`examples/ecommerce`](examples/ecommerce/) — Full real-world **Weft Roasters** e-commerce store: SSR HTML + HTMX live catalog/cart/admin, SQLite sessions/CSRF/PBKDF2 auth + guest cart merge, multipart binary image uploads, atomic checkout outbox `JobWorker`, static assets, JSON API, and `TestSession` E2E tests
 
 ```bash
 cd examples/hello-world
