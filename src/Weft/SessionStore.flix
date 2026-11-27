@@ -150,9 +150,9 @@ pub mod Weft.SessionStore {
             "CREATE TABLE IF NOT EXISTS _weft_sessions (" +
             "id TEXT PRIMARY KEY, " +
             "payload TEXT NOT NULL, " +
-            "expires_at_ms INTEGER NOT NULL, " +
-            "created_at_ms INTEGER NOT NULL, " +
-            "updated_at_ms INTEGER NOT NULL);" +
+            "expires_at_ms BIGINT NOT NULL, " +
+            "created_at_ms BIGINT NOT NULL, " +
+            "updated_at_ms BIGINT NOT NULL);" +
             "CREATE INDEX IF NOT EXISTS idx_weft_sessions_expires ON _weft_sessions (expires_at_ms)"
         ) :: Nil
 

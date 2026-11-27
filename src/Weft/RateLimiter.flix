@@ -235,16 +235,16 @@ pub mod Weft.RateLimiter {
     // --- 3. Driver-Agnostic SQL Backend (SQLite & Future DBs) ---
 
     ///
-    /// Schema migration creating `_weft_rate_limits` (version `1003`).
+    /// Schema migration creating `_weft_rate_limits` (version `1006`).
     ///
     pub def migrations(): List[Migration] =
         Migration.make(
-            1003,
+            1006,
             "create_weft_rate_limits_table",
             "CREATE TABLE IF NOT EXISTS _weft_rate_limits (" +
             "key TEXT PRIMARY KEY, " +
             "hits INTEGER NOT NULL, " +
-            "reset_at_ms INTEGER NOT NULL);" +
+            "reset_at_ms BIGINT NOT NULL);" +
             "CREATE INDEX IF NOT EXISTS idx_weft_rate_limits_reset ON _weft_rate_limits (reset_at_ms)"
         ) :: Nil
 

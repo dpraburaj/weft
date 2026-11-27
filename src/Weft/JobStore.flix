@@ -224,10 +224,47 @@ pub mod Weft.JobStore {
         Nil
 
     ///
-    /// Applies the `_weft_jobs` schema migrations idempotently.
+    /// Applies the `_weft_jobs` schema migrations idempotently (SQLite dialect).
     ///
     pub def initSchema(): Unit \ {Db, DbError} = {
         let _ = Migration.runAll(migrations());
+        ()
+    }
+
+    ///
+    /// PostgreSQL-compatible schema migrations creating `_weft_jobs` (`BIGSERIAL`, `BIGINT`).
+    ///
+    pub def migrationsPostgres(): List[Migration] =
+        Migration.make(
+            1001,
+            "create_weft_jobs_table",
+            "CREATE TABLE IF NOT EXISTS _weft_jobs (" +
+            "id BIGSERIAL PRIMARY KEY, " +
+            "queue TEXT NOT NULL, " +
+            "kind TEXT NOT NULL, " +
+            "payload TEXT NOT NULL, " +
+            "status TEXT NOT NULL, " +
+            "attempts INTEGER NOT NULL DEFAULT 0, " +
+            "max_attempts INTEGER NOT NULL DEFAULT 3, " +
+            "run_at_ms BIGINT NOT NULL, " +
+            "last_error TEXT, " +
+            "created_at_ms BIGINT NOT NULL, " +
+            "updated_at_ms BIGINT NOT NULL);" +
+            "CREATE INDEX IF NOT EXISTS idx_weft_jobs_due ON _weft_jobs (queue, status, run_at_ms, id)"
+        ) ::
+        Migration.make(
+            1003,
+            "add_weft_jobs_unique_key",
+            "ALTER TABLE _weft_jobs ADD COLUMN IF NOT EXISTS unique_key TEXT;" +
+            "CREATE INDEX IF NOT EXISTS idx_weft_jobs_unique_key ON _weft_jobs (unique_key, status)"
+        ) ::
+        Nil
+
+    ///
+    /// Applies the PostgreSQL `_weft_jobs` schema migrations idempotently.
+    ///
+    pub def initSchemaPostgres(): Unit \ {Db, DbError} = {
+        let _ = Migration.runAll(migrationsPostgres());
         ()
     }
 

@@ -1,4 +1,6 @@
 pub mod Weft.JobBackend {
+    use Weft.Db.Postgres
+    use Weft.Db.PostgresDb
     use Weft.Db.Sqlite
     use Weft.Db.SqliteDb
     use Weft.DbError
@@ -9,11 +11,13 @@ pub mod Weft.JobBackend {
     use Time.Clock
 
     ///
-    /// Configurable runtime job backend: switch between in-memory and SQLite with one value!
+    /// Configurable runtime job backend: switch between in-memory, SQLite, and PostgreSQL
+    /// with a single value!
     ///
     pub enum JobBackend {
         case InMemory(InMemoryJobStore)
         case Sqlite(SqliteDb)
+        case Postgres(PostgresDb)
     }
 
     ///
@@ -36,7 +40,20 @@ pub mod Weft.JobBackend {
         }
 
     ///
-    /// Discharges `JobStore` using whichever backend (`InMemory` or `Sqlite`) is configured.
+    /// Convenience constructor for a PostgreSQL-backed job backend (also ensures schema exists).
+    ///
+    pub def postgres(db: PostgresDb): Result[String, JobBackend] \ IO =
+        let res = run {
+            JobStore.initSchemaPostgres()
+        } with Postgres.runWith(db)
+          with DbError.runToResult;
+        match res {
+            case Ok(())           => Ok(JobBackend.Postgres(db))
+            case Err((kind, msg)) => Err("Failed to initialize PostgreSQL job schema (${kind}): ${msg}")
+        }
+
+    ///
+    /// Discharges `JobStore` using whichever backend (`InMemory`, `Sqlite`, or `Postgres`) is configured.
     ///
     pub def runStore(backend: JobBackend, f: Unit -> a \ ef): a \ (ef - JobStore) + {DbError, IO} =
         match backend {
@@ -47,6 +64,11 @@ pub mod Weft.JobBackend {
                     f()
                 } with JobStore.runWithDb
                   with Sqlite.runWith(db)
+            case JobBackend.Postgres(db) =>
+                run {
+                    f()
+                } with JobStore.runWithDb
+                  with Postgres.runWith(db)
         }
 
     ///

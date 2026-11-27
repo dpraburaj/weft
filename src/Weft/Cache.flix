@@ -364,12 +364,12 @@ pub mod Weft.Cache {
             "CREATE TABLE IF NOT EXISTS _weft_cache (" +
             "key TEXT PRIMARY KEY, " +
             "value TEXT NOT NULL, " +
-            "expires_at_ms INTEGER);" +
+            "expires_at_ms BIGINT);" +
             "CREATE INDEX IF NOT EXISTS idx_weft_cache_expires ON _weft_cache (expires_at_ms);" +
             "CREATE TABLE IF NOT EXISTS _weft_cache_locks (" +
             "name TEXT PRIMARY KEY, " +
             "owner TEXT NOT NULL, " +
-            "expires_at_ms INTEGER NOT NULL);" +
+            "expires_at_ms BIGINT NOT NULL);" +
             "CREATE INDEX IF NOT EXISTS idx_weft_cache_locks_expires ON _weft_cache_locks (expires_at_ms)"
         ) :: Nil
 

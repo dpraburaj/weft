@@ -97,7 +97,7 @@ pub mod Weft.ScheduleStore {
             "create_weft_schedules_table",
             "CREATE TABLE IF NOT EXISTS _weft_schedules (" +
             "task_name TEXT PRIMARY KEY, " +
-            "last_run_at_ms INTEGER NOT NULL)"
+            "last_run_at_ms BIGINT NOT NULL)"
         ) :: Nil
 
     ///
