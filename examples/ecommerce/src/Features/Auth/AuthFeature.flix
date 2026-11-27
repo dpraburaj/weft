@@ -2,13 +2,17 @@ pub mod Features.Auth.AuthFeature {
     use Features.Auth.AuthViews
     use Features.Auth.UserStore
     use Features.Cart.CartStore
+    use Time.Clock
     use weft::Weft.Auth
     use weft::Weft.Crypto
     use weft::Weft.HtmlDoc
     use weft::Weft.HttpError
     use weft::Weft.IntoResponse
+    use weft::Weft.Middleware
     use weft::Weft.OptionalAuth
     use weft::Weft.Random
+    use weft::Weft.RateLimitConfig
+    use weft::Weft.RateLimiter
     use weft::Weft.Req
     use weft::Weft.Response
     use weft::Weft.Router
@@ -24,11 +28,30 @@ pub mod Features.Auth.AuthFeature {
             |> Router.get("/login", loginPage)
             |> Router.get("/register", registerPage)
 
-    pub def mutationRoutes(passwordIterations: Int32): Router[{Req, HttpError, OptionalAuth, Session, Random, UserStore, CartStore}] =
-        Router.empty()
-            |> Router.post("/login", loginPost)
-            |> Router.post("/register", () -> registerPost(passwordIterations))
-            |> Router.post("/logout", logoutPost)
+    ///
+    /// Auth mutation routes with per-client rate limiting (`10 req/min` on `/login` & `/register`)
+    /// via `Weft.RateLimiter` + `Middleware.throttleRoute`.
+    ///
+    pub def mutationRoutes(passwordIterations: Int32): Router[{Req, HttpError, OptionalAuth, Session, Random, RateLimiter, Clock, UserStore, CartStore}] = {
+        let authThrottle = RateLimitConfig.perMinute(10) |> RateLimitConfig.withPrefix("auth");
+        let throttledAuth: Router[{Req, HttpError, OptionalAuth, Session, Random, RateLimiter, Clock, UserStore, CartStore}] =
+            Router.empty()
+                |> Router.post("/login", loginPost)
+                |> Router.post("/register", () -> registerPost(passwordIterations))
+                |> Router.withMiddleware(Middleware.throttleRoute(authThrottle, clientIpKey));
+        throttledAuth |> Router.post("/logout", logoutPost)
+    }
+
+    def clientIpKey(): String \ Req =
+        match Req.header("X-Forwarded-For") {
+            case Some(raw) =>
+                match List.head(String.splitOn({substr = ","}, raw)) {
+                    case Some(first) if not String.isEmpty(String.trim(first)) => String.trim(first)
+                    case _ => "local"
+                }
+            case None =>
+                Option.getWithDefault("local", Req.header("X-Real-IP"))
+        }
 
     // --- Handlers (Zero SQL / Zero `Db` coupling) ---
 

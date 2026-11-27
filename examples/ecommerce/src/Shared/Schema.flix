@@ -1,11 +1,14 @@
 pub mod Shared.Schema {
+    use weft::Weft.Cache
     use weft::Weft.Crypto
     use weft::Weft.Db
     use weft::Weft.DbError
     use weft::Weft.JobStore
     use weft::Weft.Migration
     use weft::Weft.Random
+    use weft::Weft.RateLimiter
     use weft::Weft.Row
+    use weft::Weft.ScheduleStore
     use weft::Weft.SessionStore
     use weft::Weft.SqlValue
 
@@ -92,13 +95,17 @@ pub mod Shared.Schema {
         Nil
 
     ///
-    /// Runs all application + Weft framework migrations (`_weft_sessions`, `_weft_jobs`)
-    /// and seeds the demo catalog, promo codes, and demo accounts idempotently.
+    /// Runs all application + Weft framework migrations (`_weft_sessions`, `_weft_jobs`,
+    /// `_weft_rate_limits`, `_weft_cache`, `_weft_schedules`) and seeds the demo catalog,
+    /// promo codes, and demo accounts idempotently.
     ///
     pub def initAndSeed(passwordIterations: Int32): Unit \ {Db, DbError, Random} = {
         let _ = Migration.runAll(migrations());
         SessionStore.initSchema();
         JobStore.initSchema();
+        RateLimiter.initSchema();
+        Cache.initSchema();
+        ScheduleStore.initSchema();
         seedDemoData(passwordIterations)
     }
 

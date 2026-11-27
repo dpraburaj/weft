@@ -1,12 +1,14 @@
 mod Features.Catalog.CatalogViews {
-    use Features.Catalog.{CatalogFilter, Product}
+    use Shared.Artwork
+    use Shared.Domain.{CatalogFilter, Product}
     use weft::Weft.Csrf
     use weft::Weft.Html
     use weft::Weft.Html.{
         a, action, attr, attrIf, button, cls, clsIf, disabled, div, each, form,
-        h1, h1Text, h2Text, h3, href, hxGet, hxPost, hxSwap, hxTarget, hxTrigger,
-        id, img, input, label, link, method, name, option, p, pText, placeholder,
-        raw, section, select_, selected, span, spanText, text, type_, value, when
+        h1, h2Text, h3, href, hxGet, hxPost, hxSwap, hxTarget, hxTrigger, id,
+        img, input, label, link, method, name, option, p, pText, placeholder,
+        raw, section, select_, selected, span, spanText, strongText, text,
+        type_, value, when
     }
     use weft::Weft.HtmlDoc
     use weft::Weft.Page
@@ -26,14 +28,14 @@ mod Features.Catalog.CatalogViews {
         let csrfTok = Csrf.token();
         let gridHtml = Html.renderString(() -> renderProductGridInner(csrfTok, filter, pg));
         let bodyHtml = Html.renderString(() -> {
-            renderHero();
+            renderEditorialMasthead();
             renderFilterBar(filter);
             div(() -> {
                 id("product-grid-container");
                 raw(gridHtml)
             })
         });
-        Shared.Layout.renderShell("Shop Specialty Coffee & Gear", csrfTok, userOpt, cartCount, flashOk, flashErr, bodyHtml)
+        Shared.Layout.renderShell("Coffee & Brewing Equipment", csrfTok, userOpt, cartCount, flashOk, flashErr, bodyHtml)
     }
 
     pub def productGridPartial(filter: CatalogFilter, pg: Page[Product]): HtmlDoc \ {Session, Random} = {
@@ -53,17 +55,41 @@ mod Features.Catalog.CatalogViews {
         Shared.Layout.renderShell(prod#name, csrfTok, userOpt, cartCount, flashOk, flashErr, bodyHtml)
     }
 
-    // --- Pure HTML Sections ---
+    // --- Editorial Masthead (Specialty Roastery Aesthetic) ---
 
-    def renderHero(): Unit \ Html =
+    def renderEditorialMasthead(): Unit \ Html =
         section(() -> {
-            cls("hero");
+            cls("masthead");
             div(() -> {
-                span(() -> { cls("hero-pill"); text("Small-Batch Roastery & Precision Gear") });
-                h1Text("Freshly roasted single-origin coffee & precision brewers");
-                pText("Use promo code WELCOME10 for 10% off or FREESHIP for complimentary shipping. Free shipping automatically over $75.")
+                cls("masthead-copy");
+                div(() -> { cls("masthead-kicker"); text("AUTUMN HARVEST · ISSUE 04") });
+                h1(() -> {
+                    text("Seasonal single-origin coffee & ");
+                    span(() -> { cls("serif-italic"); text("precision brew ware.") })
+                });
+                p(() -> {
+                    cls("masthead-lead");
+                    text("Washed and honey-processed micro-lots roasted every Tuesday and Friday, alongside tools built for quiet morning rituals.")
+                })
+            });
+            div(() -> {
+                cls("harvest-ledger");
+                div(() -> { cls("ledger-title"); text("ROASTERY LEDGER") });
+                ledgerRow("Roast schedule", "Tue & Fri · Shipped 24h");
+                ledgerRow("Featured lot", "Yirgacheffe Washed");
+                ledgerRow("Promo codes", "WELCOME10 · FREESHIP");
+                ledgerRow("Complimentary shipping", "Orders $75+")
             })
         })
+
+    def ledgerRow(k: String, v: String): Unit \ Html =
+        div(() -> {
+            cls("ledger-row");
+            span(() -> { cls("ledger-key"); text(k) });
+            span(() -> { cls("ledger-val"); text(v) })
+        })
+
+    // --- Underline Category Tabs & Search ---
 
     def renderFilterBar(filter: CatalogFilter): Unit \ Html = {
         let curCat = Option.getWithDefault("", filter#category);
@@ -74,10 +100,10 @@ mod Features.Catalog.CatalogViews {
             method("get");
             action("/");
             div(() -> {
-                cls("category-pills");
-                renderCategoryPill("", "All", curCat, filter);
+                cls("category-tabs");
+                renderCategoryTab("", "All", curCat, filter);
                 each(Shared.Money.categories(), match (slug, title) ->
-                    renderCategoryPill(slug, title, curCat, filter)
+                    renderCategoryTab(slug, title, curCat, filter)
                 )
             });
             div(() -> {
@@ -89,16 +115,18 @@ mod Features.Catalog.CatalogViews {
                     value(curCat)
                 });
                 input(() -> {
+                    cls("search-input");
                     type_("search");
                     name("q");
                     value(curQ);
-                    placeholder("Search coffee, grinders, SKUs...");
+                    placeholder("Search origin, gear, SKU…");
                     hxGet("/products/grid");
                     hxTrigger("keyup changed delay:250ms, search");
                     hxTarget("#product-grid-container");
                     attr("hx-include", "#catalog-filters")
                 });
                 select_(() -> {
+                    cls("sort-select");
                     name("sort");
                     hxGet("/products/grid");
                     hxTrigger("change");
@@ -107,14 +135,14 @@ mod Features.Catalog.CatalogViews {
                     sortOption("featured", "Featured", filter#sort);
                     sortOption("price_asc", "Price: Low to High", filter#sort);
                     sortOption("price_desc", "Price: High to Low", filter#sort);
-                    sortOption("name_asc", "Name: A–Z", filter#sort)
+                    sortOption("name_asc", "Alphabetical", filter#sort)
                 });
-                button(() -> { cls("btn-secondary btn-sm"); type_("submit"); text("Filter") })
+                button(() -> { cls("btn-secondary btn-sm"); type_("submit"); text("Apply") })
             })
         })
     }
 
-    def renderCategoryPill(slug: String, title: String, curCat: String, filter: CatalogFilter): Unit \ Html = {
+    def renderCategoryTab(slug: String, title: String, curCat: String, filter: CatalogFilter): Unit \ Html = {
         let qs = buildGridQuery(
             filter#search,
             if (String.isEmpty(slug)) None else Some(slug),
@@ -122,7 +150,7 @@ mod Features.Catalog.CatalogViews {
             1
         );
         a(() -> {
-            cls("pill");
+            cls("cat-tab");
             clsIf(curCat == slug, "active");
             href("/" + qs);
             hxGet("/products/grid" + qs);
@@ -138,17 +166,20 @@ mod Features.Catalog.CatalogViews {
             text(labelText)
         })
 
+    // --- Gallery Product Grid ---
+
     def renderProductGridInner(csrfTok: String, filter: CatalogFilter, pg: Page[Product]): Unit \ Html = {
         let items = Page.items(pg);
-        p(() -> {
-            cls("muted");
-            text("Showing ${List.length(items)} of ${Page.totalItems(pg)} products")
+        div(() -> {
+            cls("grid-meta");
+            span(() -> { cls("mono-meta"); text("Showing ${List.length(items)} of ${Page.totalItems(pg)} products") })
         });
         if (List.isEmpty(items)) {
             div(() -> {
-                cls("panel");
-                h3(() -> text("No products match your filters"));
-                p(() -> { cls("muted"); text("Try clearing the search query or switching categories.") })
+                cls("empty-catalog");
+                h3(() -> text("No products match those filters"));
+                p(() -> { cls("muted"); text("Clear your search term or browse another category.") });
+                a(() -> { cls("btn btn-secondary btn-sm"); href("/"); text("Reset catalog") })
             })
         } else {
             div(() -> {
@@ -161,26 +192,33 @@ mod Features.Catalog.CatalogViews {
 
     def renderProductCard(csrfTok: String, prod: Product): Unit \ Html =
         div(() -> {
-            cls("card");
-            div(() -> {
-                cls("product-thumb");
+            cls("product-card");
+            a(() -> {
+                cls("product-media");
+                href("/products/${prod#slug}");
                 if (prod#hasImage)
                     img("/media/products/${prod#id}", prod#name)
                 else
-                    span(() -> { cls("thumb-placeholder"); text(prod#sku) })
+                    Artwork.productIllustration(prod)
             });
             div(() -> {
-                cls("card-body");
-                span(() -> { cls("cat-tag"); text(prod#category) });
+                cls("product-body");
+                div(() -> {
+                    cls("product-meta-row");
+                    span(() -> { cls("product-cat"); text(prod#category) });
+                    span(() -> { cls("product-sku"); text(prod#sku) })
+                });
                 h3(() -> {
                     cls("product-title");
                     link("/products/${prod#slug}", prod#name)
                 });
                 p(() -> { cls("product-desc"); text(prod#description) });
-                renderStockBadge(prod#stock);
                 div(() -> {
-                    cls("price-row");
-                    span(() -> { cls("price"); text(Shared.Money.formatCents(prod#priceCents)) });
+                    cls("product-foot");
+                    div(() -> {
+                        span(() -> { cls("price tabular"); text(Shared.Money.formatCents(prod#priceCents)) });
+                        renderStockLine(prod#stock)
+                    });
                     form(() -> {
                         method("post");
                         action("/cart/items");
@@ -194,20 +232,20 @@ mod Features.Catalog.CatalogViews {
                             type_("submit");
                             cls("btn-sm");
                             when(prod#stock <= 0, () -> disabled());
-                            text(if (prod#stock > 0) "Add to Cart" else "Sold Out")
+                            text(if (prod#stock > 0) "Add to Bag" else "Sold Out")
                         })
                     })
                 })
             })
         })
 
-    def renderStockBadge(stock: Int32): Unit \ Html =
+    def renderStockLine(stock: Int32): Unit \ Html =
         if (stock <= 0)
-            span(() -> { cls("stock-out"); text("Out of stock") })
+            div(() -> { cls("stock-line out"); text("Out of stock") })
         else if (stock <= 5)
-            span(() -> { cls("stock-low"); text("Only ${stock} left") })
+            div(() -> { cls("stock-line low"); text("Only ${stock} remaining") })
         else
-            span(() -> { cls("stock-ok"); text("In stock (${stock})") })
+            div(() -> { cls("stock-line ok"); text("In stock") })
 
     def renderPagination(filter: CatalogFilter, pg: Page[Product]): Unit \ Html = {
         let cur = Page.page(pg);
@@ -224,7 +262,7 @@ mod Features.Catalog.CatalogViews {
                     text("← Previous")
                 })
             });
-            span(() -> { cls("muted"); text("Page ${cur} of ${tot}") });
+            span(() -> { cls("mono-meta"); text("Page ${cur} / ${tot}") });
             when(Page.hasNext(pg), () -> {
                 let nextQs = buildGridQuery(filter#search, filter#category, filter#sort, cur + 1);
                 a(() -> {
@@ -238,54 +276,77 @@ mod Features.Catalog.CatalogViews {
         })
     }
 
+    // --- Editorial Product Detail Page ---
+
     def renderProductDetailBody(csrfTok: String, prod: Product): Unit \ Html = {
-        p(() -> link("/", "← Back to Catalog"));
         div(() -> {
-            cls("panel two-col");
+            cls("breadcrumb-bar");
+            link("/", "Shop");
+            span(() -> { cls("crumb-sep"); text("/") });
+            span(() -> { cls("muted"); text(prod#name) })
+        });
+        div(() -> {
+            cls("detail-layout");
             div(() -> {
-                div(() -> {
-                    cls("product-thumb");
-                    attr("style", "height:300px;border-radius:10px;border:1px solid var(--border);margin-bottom:1rem");
-                    if (prod#hasImage)
-                        img("/media/products/${prod#id}", prod#name)
-                    else
-                        span(() -> { cls("thumb-placeholder"); text(prod#sku) })
-                });
-                span(() -> { cls("cat-tag"); text(prod#category) });
-                h1(() -> text(prod#name));
-                p(() -> { cls("muted"); text("SKU: ${prod#sku}") });
-                pText(prod#description)
+                cls("detail-media");
+                if (prod#hasImage)
+                    img("/media/products/${prod#id}", prod#name)
+                else
+                    Artwork.productIllustration(prod)
             });
             div(() -> {
-                h2Text(Shared.Money.formatCents(prod#priceCents));
-                renderStockBadge(prod#stock);
+                cls("detail-info");
+                div(() -> {
+                    cls("product-meta-row");
+                    span(() -> { cls("product-cat"); text(prod#category) });
+                    span(() -> { cls("product-sku"); text(prod#sku) })
+                });
+                h1(() -> { cls("detail-title"); text(prod#name) });
+                div(() -> {
+                    cls("detail-price-row");
+                    h2Text(Shared.Money.formatCents(prod#priceCents));
+                    renderStockLine(prod#stock)
+                });
+                p(() -> { cls("detail-desc"); text(prod#description) });
+
                 form(() -> {
+                    cls("detail-form");
                     method("post");
                     action("/cart/items");
                     hxPost("/cart/items");
                     hxTarget("#cart-badge");
                     hxSwap("outerHTML");
-                    attr("style", "margin-top:1.25rem");
                     Shared.Layout.csrfInput(csrfTok);
                     input(() -> { type_("hidden"); name("product_id"); value("${prod#id}") });
                     div(() -> {
-                        cls("form-group");
-                        label(() -> { attr("for", "qty"); text("Quantity") });
-                        input(() -> {
-                            id("qty");
-                            type_("number");
-                            name("quantity");
-                            value("1");
-                            attr("min", "1");
-                            attrIf(prod#stock > 0, "max", "${prod#stock}")
+                        cls("detail-buy-row");
+                        div(() -> {
+                            cls("form-group");
+                            attr("style", "margin:0;width:96px");
+                            label(() -> { attr("for", "qty"); text("Qty") });
+                            input(() -> {
+                                id("qty");
+                                type_("number");
+                                name("quantity");
+                                value("1");
+                                attr("min", "1");
+                                attrIf(prod#stock > 0, "max", "${prod#stock}")
+                            })
+                        });
+                        button(() -> {
+                            cls("btn-buy");
+                            type_("submit");
+                            when(prod#stock <= 0, () -> disabled());
+                            text(if (prod#stock > 0) "Add to Bag" else "Sold Out")
                         })
-                    });
-                    button(() -> {
-                        type_("submit");
-                        attr("style", "width:100%");
-                        when(prod#stock <= 0, () -> disabled());
-                        text(if (prod#stock > 0) "Add to Cart" else "Sold Out")
                     })
+                });
+
+                div(() -> {
+                    cls("detail-specs");
+                    div(() -> { cls("spec-row"); spanText("SKU"); strongText(prod#sku) });
+                    div(() -> { cls("spec-row"); spanText("Availability"); strongText("${prod#stock} units ready") });
+                    div(() -> { cls("spec-row"); spanText("Shipping"); strongText("Free over $75 · $8 flat") })
                 })
             })
         })

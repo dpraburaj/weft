@@ -1,5 +1,5 @@
 mod Features.Cart.CartViews {
-    use Features.Cart.{CartLine, CartSummary}
+    use Shared.Domain.{CartLine, CartSummary}
     use weft::Weft.Csrf
     use weft::Weft.Html
     use weft::Weft.Html.{

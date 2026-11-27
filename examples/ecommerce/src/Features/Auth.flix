@@ -2,14 +2,6 @@ pub mod Features.Auth {
     use Features.Auth.UserStore
     use weft::Weft.Principal
 
-    pub type alias User = {
-        id           = Int64,
-        email        = String,
-        name         = String,
-        passwordHash = String,
-        role         = String
-    }
-
     ///
     /// Session principal loader used by Weft auth middlewares (`optionalSessionAuth`, `sessionAuthOrRedirect`).
     /// Depends only on the high-level `UserStore` effect (zero raw SQL or `Db` coupling).

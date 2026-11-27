@@ -4,32 +4,37 @@ mod TestHarness {
     use Features.Cart.CartStore
     use Features.Catalog.CatalogStore
     use Features.Checkout.OrderStore
-    use Shared.Mailer
-    use Shared.Mailer.EmailMessage
     use Shared.Schema
     use Time.Clock
     use weft::Weft.App
     use weft::Weft.Body
+    use weft::Weft.Cache
     use weft::Weft.Db
     use weft::Weft.Db.Sqlite
     use weft::Weft.Db.SqliteConfig
     use weft::Weft.Db.SqliteDb
     use weft::Weft.DbError
+    use weft::Weft.Email
     use weft::Weft.HttpError
     use weft::Weft.JobQueue
     use weft::Weft.JobStore
     use weft::Weft.JobWorker
+    use weft::Weft.Mailer
+    use weft::Weft.Method
     use weft::Weft.Random
+    use weft::Weft.RateLimiter
     use weft::Weft.Request
     use weft::Weft.Response
     use weft::Weft.Row
     use weft::Weft.SessionStore
-    use weft::Weft.SqlValue
     use weft::Weft.StaticStore
     use weft::Weft.TestEffects
     use weft::Weft.TestSession
     use weft::Weft.Url
     use weft::Weft.WorkerConfig
+
+    import java.io.{File => JFile}
+    import java.lang.System
 
     ///
     /// Runs `f` against an isolated in-memory SQLite database seeded with demo data
@@ -59,9 +64,52 @@ mod TestHarness {
                 }
         }
 
+    ///
+    /// Runs `f` against a temporary file-backed SQLite database with WAL mode and a
+    /// 4-connection concurrent reader pool enabled, cleaning up temp files afterward.
+    ///
+    pub def withPooledWalTestEnv(f: (SqliteDb, App[IO]) -> Unit \ {IO, Assert}): Unit \ {IO, Assert} = {
+        let tmpDir = System.getProperty("java.io.tmpdir");
+        let dbFile = new JFile(tmpDir, "weft-ecommerce-wal-${System.nanoTime()}.db");
+        let dbPath = dbFile.getAbsolutePath();
+        let cfg = SqliteConfig.file(dbPath) |> SqliteConfig.withReadPoolSize(4);
+        match Sqlite.open(cfg) {
+            case Err(msg) =>
+                cleanupSqliteFiles(dbPath);
+                assertTrue(false);
+                println("Failed to open pooled WAL SQLite: ${msg}")
+            case Ok(db) =>
+                let initRes = run {
+                    Schema.initAndSeed(1000)
+                } with Sqlite.runWith(db)
+                  with DbError.runToResult
+                  with Random.runWithSecureRandom;
+                match initRes {
+                    case Err((k, msg)) =>
+                        Sqlite.close(db);
+                        cleanupSqliteFiles(dbPath);
+                        assertTrue(false);
+                        println("Init failed (${k}): ${msg}")
+                    case Ok(()) =>
+                        let app = ShopApp.build("test-session-secret-0123456789", 1000);
+                        let wired = wireTestApp(db, defaultStaticAssets(), app);
+                        f(db, wired);
+                        Sqlite.close(db);
+                        cleanupSqliteFiles(dbPath)
+                }
+        }
+    }
+
+    def cleanupSqliteFiles(path: String): Unit \ IO = {
+        let _ = (new JFile(path)).delete();
+        let _ = (new JFile("${path}-wal")).delete();
+        let _ = (new JFile("${path}-shm")).delete();
+        ()
+    }
+
     pub def defaultStaticAssets(): Map[String, Vector[Int8]] =
         Map#{
-            "styles.css"     => Body.utf8Bytes("body { margin: 0; }"),
+            "styles.css"     => Body.utf8Bytes("body { margin: 0; font-family: sans-serif; background: #faf8f5; }"),
             "brand-mark.svg" => Body.utf8Bytes("<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>")
         }
 
@@ -70,66 +118,72 @@ mod TestHarness {
         assets: Map[String, Vector[Int8]],
         app: App[ShopApp.ShopEffects]
     ): App[IO] = req -> {
-        let s1: Unit -> Response \ {UserStore, OrderStore, SessionStore, Db, DbError, Random, Clock, StaticStore, Logger} = () ->
-            run {
-                app(req)
-            } with CatalogStore.runWithDb
-              with CartStore.runWithDb;
+        if (Request.method(req) == Method.Get and Request.path(req) == "/health") {
+            LiveServer.healthResponse(db)
+        } else {
+            let s1: Unit -> Response \ {UserStore, OrderStore, SessionStore, Cache, RateLimiter, Db, DbError, Random, Clock, StaticStore, Logger} = () ->
+                run {
+                    app(req)
+                } with CatalogStore.runWithDb
+                  with CartStore.runWithDb;
 
-        let s2: Unit -> Response \ {SessionStore, JobQueue, Db, DbError, Random, Clock, StaticStore, Logger} = () ->
-            run {
-                s1()
-            } with UserStore.runWithDb
-              with OrderStore.runWithDb;
+            let s2: Unit -> Response \ {SessionStore, JobQueue, Cache, RateLimiter, Db, DbError, Random, Clock, StaticStore, Logger} = () ->
+                run {
+                    s1()
+                } with UserStore.runWithDb
+                  with OrderStore.runWithDb;
 
-        let s3: Unit -> Response \ {Db, DbError, Random, Clock, StaticStore, Logger} = () ->
-            run {
-                s2()
-            } with SessionStore.runWithDb
-              with JobQueue.runWithDb;
+            let s3: Unit -> Response \ {Db, DbError, Random, Clock, StaticStore, Logger} = () ->
+                run {
+                    s2()
+                } with SessionStore.runWithDb
+                  with JobQueue.runWithDb
+                  with Cache.runWithDb
+                  with RateLimiter.runWithDb;
 
-        let s4: Unit -> Response \ {Random, Clock, Logger, IO} = () ->
-            run {
-                s3()
-            } with StaticStore.runPure(assets)
-              with Sqlite.runWith(db)
-              with DbError.runToHttpErrorSafe
-              with HttpError.runAsHtml;
+            let s4: Unit -> Response \ {Random, Clock, Logger, IO} = () ->
+                run {
+                    s3()
+                } with StaticStore.runPure(assets)
+                  with Sqlite.runWith(db)
+                  with DbError.runToHttpErrorSafe
+                  with HttpError.runAsHtml;
 
-        run {
-            s4()
-        } with Random.runWithSecureRandom
-          with Clock.runWithIO
-          with TestEffects.runSilentLogger
+            run {
+                s4()
+            } with Random.runWithSecureRandom
+              with Clock.runWithIO
+              with TestEffects.runSilentLogger
+        }
     }
 
     ///
     /// Drains all pending jobs from `_weft_jobs` through `ShopApp.jobRegistry()` and
-    /// returns every outbound `EmailMessage` captured by `Shared.Mailer.runRecording`.
+    /// returns every outbound `Weft.Email` captured by `Weft.Mailer.runRecording`.
     ///
-    pub def drainJobs(db: SqliteDb): List[EmailMessage] \ IO = region rc {
-        let emailsRef: Ref[List[EmailMessage], rc] = Ref.fresh(rc, Nil);
+    pub def drainJobs(db: SqliteDb): List[Email] \ IO = {
         let reg = ShopApp.jobRegistry();
         let cfg = WorkerConfig.default();
-        def loop(remaining: Int32): Unit \ {IO, rc} = {
-            if (remaining <= 0) ()
-            else {
-                let res = run {
-                    JobWorker.runNext(cfg, reg)
-                } with JobStore.runWithDb
-                  with Sqlite.runWith(db)
-                  with DbError.runToResult
-                  with Mailer.runRecording(emailsRef)
-                  with Clock.runWithIO
-                  with TestEffects.runSilentLogger;
-                match res {
-                    case Ok(true) => loop(remaining - 1)
-                    case _        => ()
+        let (_, sentEmails) = Mailer.runRecording(() -> {
+            def loop(remaining: Int32): Unit \ {IO, Mailer} = {
+                if (remaining <= 0) ()
+                else {
+                    let res = run {
+                        JobWorker.runNext(cfg, reg)
+                    } with JobStore.runWithDb
+                      with Sqlite.runWith(db)
+                      with DbError.runToResult
+                      with Clock.runWithIO
+                      with TestEffects.runSilentLogger;
+                    match res {
+                        case Ok(true) => loop(remaining - 1)
+                        case _        => ()
+                    }
                 }
-            }
-        };
-        loop(20);
-        Ref.get(emailsRef)
+            };
+            loop(20)
+        });
+        sentEmails
     }
 
     // --- Direct SQLite Inspection Helpers (Outside `region rc` to keep effects minimal) ---

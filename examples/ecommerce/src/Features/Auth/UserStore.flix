@@ -1,6 +1,6 @@
 pub mod Features.Auth.UserStore {
-    use Features.Auth.User
     use Features.Auth.UserStore
+    use Shared.Domain.User
     use weft::Weft.Db
     use weft::Weft.DbError
     use weft::Weft.Row

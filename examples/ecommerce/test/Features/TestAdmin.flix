@@ -1,6 +1,7 @@
 mod Features.TestAdmin {
     use Assert.assertEq
     use Assert.assertTrue
+    use weft::Weft.Email
     use weft::Weft.Response
     use weft::Weft.Status
     use weft::Weft.TestSession
@@ -104,15 +105,29 @@ mod Features.TestAdmin {
             assertEq(expected = 200, Status.code(Response.status(statusRes)));
             assertTrue(String.contains({substr = "status-shipped"}, Response.body(statusRes)));
 
-            // 3. AdminJobs handler sends status update email to customer
+            // 3. AdminJobs handler sends rich HTML + text status update email via Weft.Mailer
             let emails = TestHarness.drainJobs(db);
             assertEq(expected = 1, List.length(emails));
             match emails {
                 case msg :: Nil =>
-                    assertEq(expected = "ada@example.com", msg#to);
-                    assertTrue(String.contains({substr = "shipped"}, msg#subject))
+                    assertEq(expected = "ada@example.com" :: Nil, Email.to(msg));
+                    assertTrue(String.contains({substr = "shipped"}, Email.subject(msg)));
+                    assertTrue(Option.nonEmpty(Email.htmlBody(msg)))
                 case _ => assertTrue(false)
-            }
+            };
+
+            // 4. Dedicated admin pages render cleanly with active filtering
+            let ordersFiltered = TestSession.get("/admin/orders?status=shipped", app, admin);
+            assertEq(expected = 200, Status.code(Response.status(ordersFiltered)));
+            assertTrue(String.contains({substr = "WR-"}, Response.body(ordersFiltered)));
+
+            let lowStockPage = TestSession.get("/admin/products?stock=low", app, admin);
+            assertEq(expected = 200, Status.code(Response.status(lowStockPage)));
+            assertTrue(String.contains({substr = "Stoneware Tasting Cups"}, Response.body(lowStockPage)));
+
+            let newProdPage = TestSession.get("/admin/products/new", app, admin);
+            assertEq(expected = 200, Status.code(Response.status(newProdPage)));
+            assertTrue(String.contains({substr = "Create Product"}, Response.body(newProdPage)))
         })
 
 }

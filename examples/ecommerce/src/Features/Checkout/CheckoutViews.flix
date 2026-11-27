@@ -1,6 +1,5 @@
 mod Features.Checkout.CheckoutViews {
-    use Features.Cart.CartSummary
-    use Features.Checkout.{CheckoutInput, Order, OrderItem}
+    use Shared.Domain.{CartSummary, CheckoutInput, Order, OrderItem}
     use weft::Weft.Csrf
     use weft::Weft.Html
     use weft::Weft.Html.{

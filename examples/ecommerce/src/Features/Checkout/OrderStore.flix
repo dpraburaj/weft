@@ -1,9 +1,7 @@
 pub mod Features.Checkout.OrderStore {
-    use Features.Auth.User
-    use Features.Cart
-    use Features.Cart.{CartLine, PromoCode}
-    use Features.Checkout.{CheckoutInput, Order, OrderItem, PlaceOrderError}
     use Features.Checkout.OrderStore
+    use Shared.Domain
+    use Shared.Domain.{CartLine, CheckoutInput, Order, OrderItem, PlaceOrderError, PromoCode, User}
     use weft::Weft.Db
     use weft::Weft.DbError
     use weft::Weft.JobQueue
@@ -155,7 +153,7 @@ pub mod Features.Checkout.OrderStore {
             match dbReserveAllStock(lines) {
                 case Some(stockErr) => Err(stockErr)
                 case None =>
-                    let summary = Cart.summarize(lines, promoOpt);
+                    let summary = Domain.summarizeCart(lines, promoOpt);
                     let orderNum = "WR-" + String.toUpperCase(Random.tokenHex(4));
                     let promoVal = match promoOpt {
                         case Some(p) => SqlValue.text(p#code)

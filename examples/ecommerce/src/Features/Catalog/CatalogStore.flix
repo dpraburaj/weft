@@ -1,6 +1,6 @@
 pub mod Features.Catalog.CatalogStore {
-    use Features.Catalog.{CatalogFilter, NewProduct, Product, ProductImage}
     use Features.Catalog.CatalogStore
+    use Shared.Domain.{CatalogFilter, NewProduct, Product, ProductImage}
     use weft::Weft.Db
     use weft::Weft.DbError
     use weft::Weft.Page

@@ -1,9 +1,10 @@
 pub mod Features.Admin.AdminJobs {
-    use Shared.Mailer.Mailer
     use weft::Weft.Job
     use weft::Weft.JobError
     use weft::Weft.JobRegistry
     use weft::Weft.Json
+    use weft::Weft.Mailer
+    use weft::Weft.MailError
 
     ///
     /// Registers the Admin slice's background job handlers (`order.status_email`).
@@ -20,11 +21,11 @@ pub mod Features.Admin.AdminJobs {
         if (String.isEmpty(to) or String.isEmpty(orderNum))
             JobError.fail("Invalid order.status_email payload")
         else
-            Mailer.sendEmail(
-                to,
-                "Order ${orderNum} is now ${status}",
-                "Hi ${name}, your Weft Roasters order ${orderNum} status has been updated to: ${status}."
-            )
+            MailError.runToJobError(() -> {
+                let email = Shared.Mailer.orderStatusEmail(to, name, orderNum, status);
+                let _ = Mailer.send(email);
+                ()
+            })
     }
 
     def getStrField(k: String, j: Json): String =

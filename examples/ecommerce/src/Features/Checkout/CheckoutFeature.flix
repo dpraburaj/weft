@@ -2,9 +2,9 @@ pub mod Features.Checkout.CheckoutFeature {
     use Features.Auth.UserStore
     use Features.Cart
     use Features.Cart.CartStore
-    use Features.Checkout.{CheckoutInput, PlaceOrderError}
     use Features.Checkout.CheckoutViews
     use Features.Checkout.OrderStore
+    use Shared.Domain.{CheckoutInput, PlaceOrderError}
     use weft::Weft.Auth
     use weft::Weft.CsrfConfig
     use weft::Weft.HtmlDoc

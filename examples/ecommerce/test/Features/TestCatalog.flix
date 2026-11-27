@@ -4,18 +4,31 @@ mod Features.TestCatalog {
     use Assert.assertTrue
     use Features.Catalog.CatalogFeature
     use Features.Catalog.CatalogStore
-    use Features.Catalog.Product
+    use Shared.Domain.Product
+    use Time.Clock
+    use weft::Weft.Body
+    use weft::Weft.Cache
+    use weft::Weft.Compression
+    use weft::Weft.Db.PoolStats
+    use weft::Weft.Db.Sqlite
+    use weft::Weft.DbError
+    use weft::Weft.JobStore
     use weft::Weft.Json
     use weft::Weft.Middleware
+    use weft::Weft.RateLimiter
     use weft::Weft.Request
     use weft::Weft.Response
     use weft::Weft.Router
+    use weft::Weft.Scheduler
+    use weft::Weft.ScheduleStore
+    use weft::Weft.SessionStore
     use weft::Weft.Status
+    use weft::Weft.TestEffects
     use weft::Weft.TestSession
 
     ///
     /// Demonstrates testing a feature's HTTP handlers with ZERO SQLite and ZERO `IO`
-    /// by swapping `CatalogStore.runWithDb` for `CatalogStore.runPureReadOnly`.
+    /// by swapping `CatalogStore.runWithDb` for `CatalogStore.runPureReadOnly` + `Cache.runPure`.
     ///
     @Test
     pub def testCatalogApiWithPureStore(): Unit \ Assert = {
@@ -31,26 +44,47 @@ mod Features.TestCatalog {
             hasImage    = false
         };
         let apiApp = CatalogFeature.apiRoutes() |> Router.toApp |> Middleware.errorJson;
-        let okRes = CatalogStore.runPureReadOnly(sample :: Nil, () -> apiApp(Request.get("/products/pure-geisha")));
-        assertEq(expected = 200, Status.code(Response.status(okRes)));
-        assertTrue(String.contains({substr = "COF-PURE-01"}, Response.body(okRes)));
-        assertTrue(String.contains({substr = "$42.00"}, Response.body(okRes)));
+        run {
+            let okRes = apiApp(Request.get("/products/pure-geisha"));
+            assertEq(expected = 200, Status.code(Response.status(okRes)));
+            assertTrue(String.contains({substr = "COF-PURE-01"}, Response.body(okRes)));
+            assertTrue(String.contains({substr = "$42.00"}, Response.body(okRes)));
 
-        let missRes = CatalogStore.runPureReadOnly(sample :: Nil, () -> apiApp(Request.get("/products/missing")));
-        assertEq(expected = 404, Status.code(Response.status(missRes)));
-        assertTrue(Option.exists(ct -> String.contains({substr = "application/json"}, ct), Response.header("Content-Type", missRes)))
+            // SSE catalog snapshot endpoint runs 100% purely too
+            let sseRes = apiApp(Request.get("/events/catalog"));
+            assertEq(expected = 200, Status.code(Response.status(sseRes)));
+            assertEq(expected = Some("text/event-stream; charset=utf-8"), Response.header("Content-Type", sseRes));
+            assertTrue(String.contains({substr = "event: catalog.summary"}, Response.body(sseRes)));
+            assertTrue(String.contains({substr = "COF-PURE-01"}, Response.body(sseRes)));
+
+            let missRes = apiApp(Request.get("/products/missing"));
+            assertEq(expected = 404, Status.code(Response.status(missRes)));
+            assertTrue(Option.exists(ct -> String.contains({substr = "application/json"}, ct), Response.header("Content-Type", missRes)))
+        } with CatalogStore.runPureReadOnly(sample :: Nil)
+          with Cache.runPure
+          with TestEffects.runFixedClock(1000i64)
     }
 
     @Test
-    pub def testStaticAssetsAndStorefrontHome(): Unit \ {IO, Assert} =
+    pub def testStaticAssetsRangeAndStorefrontHome(): Unit \ {IO, Assert} =
         TestHarness.withTestEnv((_, app) -> region rc {
             let browser = TestSession.make(rc);
 
-            // Static CSS & SVG served with MIME + ETag
+            // Static CSS & SVG served with MIME + ETag + Accept-Ranges: bytes
             let cssRes = TestSession.get("/static/styles.css", app, browser);
             assertEq(expected = 200, Status.code(Response.status(cssRes)));
             assertTrue(Option.exists(ct -> String.contains({substr = "text/css"}, ct), Response.header("Content-Type", cssRes)));
             assertTrue(Option.nonEmpty(Response.header("ETag", cssRes)));
+            assertEq(expected = Some("bytes"), Response.header("Accept-Ranges", cssRes));
+
+            // HTTP Range request on static asset -> 206 Partial Content
+            let rangeRes = TestSession.send(
+                Request.get("/static/styles.css") |> Request.withHeader("Range", "bytes=0-3"),
+                app,
+                browser
+            );
+            assertEq(expected = 206, Status.code(Response.status(rangeRes)));
+            assertEq(expected = "body", Response.body(rangeRes));
 
             let svgRes = TestSession.get("/static/brand-mark.svg", app, browser);
             assertEq(expected = 200, Status.code(Response.status(svgRes)));
@@ -93,7 +127,7 @@ mod Features.TestCatalog {
         })
 
     @Test
-    pub def testProductDetailAndJsonCatalogApi(): Unit \ {IO, Assert} =
+    pub def testProductDetailGzipCompressionAndJsonCatalogApi(): Unit \ {IO, Assert} =
         TestHarness.withTestEnv((_, app) -> region rc {
             let browser = TestSession.make(rc);
 
@@ -116,11 +150,72 @@ mod Features.TestCatalog {
                 case Err(_) => assertTrue(false)
             };
 
+            // Gzip compression on /api/products when Accept-Encoding: gzip is sent
+            let gzRes = TestSession.send(
+                Request.get("/api/products") |> Request.withHeader("Accept-Encoding", "gzip"),
+                app,
+                browser
+            );
+            assertEq(expected = 200, Status.code(Response.status(gzRes)));
+            assertEq(expected = Some("gzip"), Response.header("Content-Encoding", gzRes));
+            assertEq(expected = Some("Accept-Encoding"), Response.header("Vary", gzRes));
+            match Compression.gunzip(Response.bodyBytes(gzRes)) {
+                case Ok(plain) => assertTrue(String.contains({substr = "Ethiopia Yirgacheffe"}, Body.utf8String(plain)))
+                case Err(_)    => assertTrue(false)
+            };
+
             // JSON catalog 404 uses routeErrorJson
             let apiMissRes = TestSession.get("/api/products/does-not-exist", app, browser);
             assertEq(expected = 404, Status.code(Response.status(apiMissRes)));
             assertTrue(Option.exists(ct -> String.contains({substr = "application/json"}, ct), Response.header("Content-Type", apiMissRes)));
             assertTrue(String.contains({substr = "not found"}, Response.body(apiMissRes)))
+        })
+
+    @Test
+    pub def testPooledWalHealthEndpointCacheInvalidationAndScheduler(): Unit \ {IO, Assert} =
+        TestHarness.withPooledWalTestEnv((db, app) -> region rc {
+            let browser = TestSession.make(rc);
+
+            // 1. WAL reader pool is active and exposed via GET /health
+            match Sqlite.readerPoolStats(db) {
+                case Some(st) => assertEq(expected = 4, PoolStats.maxConnections(st))
+                case None     => assertTrue(false)
+            };
+            let healthRes = TestSession.get("/health", app, browser);
+            assertEq(expected = 200, Status.code(Response.status(healthRes)));
+            assertTrue(String.contains({substr = "\"status\":\"ok\""}, Response.body(healthRes)));
+            assertTrue(String.contains({substr = "\"maxConnections\":4"}, Response.body(healthRes)));
+
+            // 2. First GET /api/products populates Cache; admin stock update invalidates it!
+            let api1 = TestSession.get("/api/products?category=coffee&per_page=10", app, browser);
+            assertTrue(String.contains({substr = "\"stock\":24"}, Response.body(api1)));
+
+            let admin = TestSession.make(rc);
+            let _ = TestHarness.loginAs("admin@weftroasters.com", "admin123", app, admin);
+            let dashRes = TestSession.get("/admin", app, admin);
+            let csrf = TestHarness.extractCsrfOrFail(dashRes);
+            let _ = TestHarness.htmxPostForm("/admin/products/1/stock", csrf, ("stock", "77") :: Nil, app, admin);
+
+            let api2 = TestSession.get("/api/products?category=coffee&per_page=10", app, browser);
+            assertTrue(String.contains({substr = "\"stock\":77"}, Response.body(api2)));
+
+            // 3. Maintenance scheduler executes all 4 periodic tasks cleanly against SQLite
+            let sched = ShopApp.maintenanceScheduler();
+            let tickRes = run {
+                Scheduler.tick(sched)
+            } with ScheduleStore.runWithDb
+              with SessionStore.runWithDb
+              with Cache.runWithDb
+              with RateLimiter.runWithDb
+              with JobStore.runWithDb
+              with Sqlite.runWith(db)
+              with DbError.runToResult
+              with Clock.runWithIO
+              with TestEffects.runSilentLogger;
+            match tickRes {
+                case Ok(ran) => assertEq(expected = 4, List.length(ran))
+                case Err(_)  => assertTrue(false)
+            }
         })
 
 }

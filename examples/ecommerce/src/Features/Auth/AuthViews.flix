@@ -67,7 +67,7 @@ mod Features.Auth.AuthViews {
                 link("/register", "Create an account")
             });
             div(() -> {
-                attr("style", "margin-top:1rem;padding:0.75rem;background:var(--surface-alt);border-radius:8px;font-size:0.84rem");
+                attr("style", "margin-top:1rem;padding:0.75rem;background:var(--surface-alt);border:1px solid var(--border);border-radius:2px;font-size:0.84rem");
                 strongText("Demo accounts: ");
                 codeText("ada@example.com / coffee123");
                 text(" (customer) or ");

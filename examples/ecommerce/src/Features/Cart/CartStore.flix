@@ -1,6 +1,6 @@
 pub mod Features.Cart.CartStore {
-    use Features.Cart.{CartLine, PromoCode}
     use Features.Cart.CartStore
+    use Shared.Domain.{CartLine, PromoCode}
     use weft::Weft.Db
     use weft::Weft.DbError
     use weft::Weft.Row

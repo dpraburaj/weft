@@ -1,9 +1,11 @@
 pub mod Features.Catalog.CatalogFeature {
     use Features.Cart.CartStore
-    use Features.Catalog
-    use Features.Catalog.CatalogFilter
     use Features.Catalog.CatalogStore
     use Features.Catalog.CatalogViews
+    use Shared.Domain
+    use Shared.Domain.CatalogFilter
+    use Time.Clock
+    use weft::Weft.Cache
     use weft::Weft.HtmlDoc
     use weft::Weft.HttpError
     use weft::Weft.Json
@@ -15,6 +17,7 @@ pub mod Features.Catalog.CatalogFeature {
     use weft::Weft.Response
     use weft::Weft.Router
     use weft::Weft.Session
+    use weft::Weft.SseEvent
 
     // --- Slice Route Builders ---
 
@@ -28,10 +31,11 @@ pub mod Features.Catalog.CatalogFeature {
         Router.empty()
             |> Router.get("/media/products/:id", productImage)
 
-    pub def apiRoutes(): Router[{Req, CatalogStore}] =
+    pub def apiRoutes(): Router[{Req, CatalogStore, Cache, Clock}] =
         Router.empty()
             |> Router.get("/products", apiListProducts)
             |> Router.get("/products/:slug", apiGetProduct)
+            |> Router.get("/events/catalog", apiCatalogEvents)
             |> Router.withMiddleware(Middleware.routeErrorJson)
 
     // --- Handlers (Zero SQL / Zero `Db` coupling) ---
@@ -69,18 +73,52 @@ pub mod Features.Catalog.CatalogFeature {
             |> Response.withHeader("Cache-Control", "public, max-age=3600")
     }
 
-    pub def apiListProducts(): Json \ {Req, HttpError, CatalogStore} = {
+    ///
+    /// Cached paginated JSON catalog endpoint (`Cache.rememberJson` with 30s TTL,
+    /// automatically invalidated by `AdminFeature` on product creation or stock changes).
+    ///
+    pub def apiListProducts(): Json \ {Req, HttpError, CatalogStore, Cache, Clock} = {
         let perPage = Req.optionalIntQuery("per_page") |> Option.getWithDefault(12);
         let filter = parseCatalogFilter(perPage);
-        let pg = CatalogStore.listProducts(filter);
-        Page.toJson(Catalog.productToJson, pg)
+        let cacheKey = catalogApiCacheKey(filter);
+        Cache.rememberJson(cacheKey, 30000i64, () -> {
+            let pg = CatalogStore.listProducts(filter);
+            Page.toJson(Domain.productToJson, pg)
+        })
     }
 
     pub def apiGetProduct(): Json \ {Req, HttpError, CatalogStore} = {
         let slug = Req.requireParam("slug");
         let prod = CatalogStore.findBySlug(slug)
             |> HttpError.orNotFound("Product '${slug}' not found");
-        Catalog.productToJson(prod)
+        Domain.productToJson(prod)
+    }
+
+    ///
+    /// Server-Sent Events (`text/event-stream`) catalog inventory snapshot endpoint.
+    ///
+    pub def apiCatalogEvents(): Response \ {CatalogStore} = {
+        let prods = CatalogStore.listAllProducts();
+        let inStockCount = List.count(p -> p#stock > 0, prods);
+        let summaryEv = SseEvent.namedJson(
+            "catalog.summary",
+            Json.obj(
+                ("totalProducts", Json.int(List.length(prods))) ::
+                ("inStockProducts", Json.int(inStockCount)) ::
+                Nil
+            )
+        ) |> SseEvent.withId("summary");
+        let productEvs = List.map(p ->
+            SseEvent.namedJson("catalog.item", Domain.productToJson(p))
+                |> SseEvent.withId("prod-${p#id}")
+        , prods);
+        Response.sseEvents(summaryEv :: productEvs)
+    }
+
+    def catalogApiCacheKey(f: CatalogFilter): String = {
+        let q = Option.getWithDefault("", f#search);
+        let cat = Option.getWithDefault("", f#category);
+        "catalog:api:q=${q}:cat=${cat}:sort=${f#sort}:p=${f#page}:pp=${f#perPage}"
     }
 
     def parseCatalogFilter(defaultPerPage: Int32): CatalogFilter \ {Req, HttpError} = {

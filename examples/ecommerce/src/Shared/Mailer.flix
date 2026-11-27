@@ -1,43 +1,50 @@
 pub mod Shared.Mailer {
+    use weft::Weft.Email
+    use weft::Weft.Html
+
+    pub def senderAddress(): String = "orders@weftroasters.com"
 
     ///
-    /// Domain algebraic effect for transactional emails (order confirmations & shipping updates).
+    /// Builds a rich HTML + plain-text order confirmation `Weft.Email`.
     ///
-    pub eff Mailer {
-        def sendEmail(to: String, subject: String, body: String): Unit
+    pub def orderConfirmationEmail(
+        to: String,
+        customerName: String,
+        orderNumber: String,
+        totalDisplay: String
+    ): Email = {
+        let html = Html.page("Order ${orderNumber} Confirmed", () ->
+            Html.main_(() -> {
+                Html.h1Text("Thank you for your order, ${customerName}!");
+                Html.pText("Your Weft Roasters order ${orderNumber} totaling ${totalDisplay} is confirmed.");
+                Html.pText("We are roasting your beans fresh and will email you when it ships.")
+            })
+        );
+        Email.make(senderAddress(), to, "Order ${orderNumber} Confirmed — Weft Roasters")
+            |> Email.withReplyTo("support@weftroasters.com")
+            |> Email.withText("Hi ${customerName}, thank you for your order ${orderNumber} totaling ${totalDisplay}. We are roasting your beans fresh!")
+            |> Email.withHtml(html)
     }
 
-    pub type alias EmailMessage = {
-        to      = String,
-        subject = String,
-        body    = String
+    ///
+    /// Builds a rich HTML + plain-text order fulfillment status update `Weft.Email`.
+    ///
+    pub def orderStatusEmail(
+        to: String,
+        customerName: String,
+        orderNumber: String,
+        status: String
+    ): Email = {
+        let html = Html.page("Order ${orderNumber} Update", () ->
+            Html.main_(() -> {
+                Html.h1Text("Order ${orderNumber} is now ${status}");
+                Html.pText("Hi ${customerName}, your Weft Roasters order ${orderNumber} status has been updated to: ${status}.")
+            })
+        );
+        Email.make(senderAddress(), to, "Order ${orderNumber} is now ${status}")
+            |> Email.withReplyTo("support@weftroasters.com")
+            |> Email.withText("Hi ${customerName}, your Weft Roasters order ${orderNumber} status has been updated to: ${status}.")
+            |> Email.withHtml(html)
     }
-
-    ///
-    /// Development/demo handler that logs outbound emails via Flix's `Logger` effect.
-    ///
-    pub def runWithLogger(f: Unit -> a \ ef): a \ (ef - Mailer) + Logger =
-        run {
-            f()
-        } with handler Mailer {
-            def sendEmail(to, subject, body, k) = {
-                Logger.info("[Mailer] To: ${to} | Subject: ${subject} | ${body}");
-                k()
-            }
-        }
-
-    ///
-    /// Pure test handler that records every sent email in a region `Ref`.
-    ///
-    pub def runRecording(outRef: Ref[List[EmailMessage], r], f: Unit -> a \ ef): a \ (ef - Mailer) + r =
-        run {
-            f()
-        } with handler Mailer {
-            def sendEmail(to, subject, body, k) = {
-                let msg: EmailMessage = { to = to, subject = subject, body = body };
-                Ref.transform(xs -> List.append(xs, msg :: Nil), outRef);
-                k()
-            }
-        }
 
 }

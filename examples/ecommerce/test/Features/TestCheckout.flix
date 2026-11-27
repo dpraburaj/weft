@@ -1,6 +1,7 @@
 mod Features.TestCheckout {
     use Assert.assertEq
     use Assert.assertTrue
+    use weft::Weft.Email
     use weft::Weft.Response
     use weft::Weft.Status
     use weft::Weft.TestSession
@@ -60,13 +61,14 @@ mod Features.TestCheckout {
             assertTrue(String.contains({substr = "WR-"}, receiptBody));
             assertTrue(String.contains({substr = "Ethiopia Yirgacheffe Washed"}, receiptBody));
 
-            // 6. Transactional outbox job sends confirmation email via Mailer effect
+            // 6. Transactional outbox job sends rich HTML + text confirmation email via Weft.Mailer
             let emails = TestHarness.drainJobs(db);
             assertEq(expected = 1, List.length(emails));
             match emails {
                 case msg :: Nil =>
-                    assertEq(expected = "ada@example.com", msg#to);
-                    assertTrue(String.contains({substr = "Confirmed"}, msg#subject))
+                    assertEq(expected = "ada@example.com" :: Nil, Email.to(msg));
+                    assertTrue(String.contains({substr = "Confirmed"}, Email.subject(msg)));
+                    assertTrue(Option.nonEmpty(Email.htmlBody(msg)))
                 case _ => assertTrue(false)
             }
         })
