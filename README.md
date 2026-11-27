@@ -17,10 +17,10 @@ Or add it directly to your `flix.toml`:
 
 ```toml
 [dependencies]
-"github:dpraburaj/weft" = { version = "0.10.0", mount = "weft", security = "unrestricted" }
+"github:dpraburaj/weft" = { version = "0.11.0", mount = "weft", security = "unrestricted" }
 ```
 
-> `security = "unrestricted"` is required by Flix because Weft uses Java interop (`HttpServer`, virtual threads) and bundles `org.xerial:sqlite-jdbc` + `org.postgresql:postgresql`.
+> `security = "unrestricted"` is required by Flix because Weft uses Java interop (Undertow, virtual threads) and bundles `io.undertow:undertow-core`, `org.xerial:sqlite-jdbc`, and `org.postgresql:postgresql`.
 
 Requires **Flix 0.80.0+** and **JDK 21+**.
 
@@ -164,9 +164,9 @@ let backend = JobBackend.inMemory(); // or: let Ok(backend) = JobBackend.sqlite(
 let handle = JobWorker.startBackground(WorkerConfig.default(), () -> ...);
 ```
 
-### Virtual-Thread Embedded HTTP Server
+### Multi-Event-Loop Embedded HTTP Server
 
-`Weft.Server` runs on JDK 21's built-in `com.sun.net.httpserver.HttpServer` backed by **Java 21 virtual threads** (`Executors.newVirtualThreadPerTaskExecutor()`), requiring no external servlet container or Netty stack. Because `Server.serve` requires `App[IO]`, the Flix compiler statically verifies that no custom effect was left unhandled.
+`Weft.Server` embeds **Undertow** (`io.undertow:undertow-core`) with multi-threaded XNIO NIO event loops (defaulting to one I/O thread per CPU core) dispatching every incoming exchange onto **Java 21 virtual threads** (`Executors.newVirtualThreadPerTaskExecutor()`), with built-in HTTP/1.1, HTTP/2 (`h2` / `h2c`), TLS, and graceful shutdown draining. Because `Server.serve` requires `App[IO]`, the Flix compiler statically verifies that no custom effect was left unhandled.
 
 ## Modules
 
@@ -192,7 +192,7 @@ let handle = JobWorker.startBackground(WorkerConfig.default(), () -> ...);
 - `Weft.{Storage,StoredFile,StorageError,StorageErrorKind,InMemoryStorage}` — Path-traversal-safe writable file storage (Pure / InMemory / LocalDir) with `UploadedFile` and `StaticStore` bridges
 - `Weft.{Mailer,Email,MailError}` — Transactional email effect with `HtmlDoc` bodies, `Mailer.runRecording` (`Mail::fake()`), `runLogging`, `runWithResend`/`runWithHttpApi`, and `JobQueue` async delivery
 - `Weft.{HttpClient,ClientRequest,ClientResponse,Env}` — Outbound JDK 21 `HttpClient` effect (with pure `runMock`/`runRecording`) and typed `Env` / `.env` config effect
-- `Weft.{Server,ServerConfig,ServerHandle,TlsConfig}` — JDK 21 virtual-thread HTTP/HTTPS server with TLS (`HttpsServer`), read/handler timeouts (`408`/`504`), chunked streaming & SSE, configurable `maxBodyBytes` (`413`), and coordinated graceful shutdown (`serveWithShutdown`)
+- `Weft.{Server,ServerConfig,ServerHandle,TlsConfig}` — Embedded Undertow multi-event-loop HTTP/1.1 + HTTP/2 + HTTPS server backed by Java 21 virtual threads, with configurable `ioThreads`, TLS, read/handler timeouts (`408`/`504`), chunked streaming & SSE, configurable `maxBodyBytes` (`413`), and coordinated graceful shutdown (`serveWithShutdown`)
 - `Weft.{TestClient,TestSession,TestEffects}` — Stateless `TestClient` (`get`, `postJson`, `postForm`, `postBytes`, `postMultipart`, `extractCsrfToken`), pure stateful `TestSession` (cookie jar + automatic redirect following for multi-step journeys), and deterministic pure `TestEffects` (`Logger`, `Time.Clock`)
 
 ## Examples

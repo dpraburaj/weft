@@ -3,9 +3,11 @@ pub mod Weft.ServerConfig {
     use Weft.TlsConfig
 
     ///
-    /// Configuration for the embedded HTTP/HTTPS server.
+    /// Configuration for the embedded Undertow HTTP/HTTPS server.
     ///
     /// - `port = 0` binds an ephemeral OS-assigned port (ideal for integration tests).
+    /// - `ioThreads = 0` (default) uses `Runtime.getRuntime().availableProcessors()` XNIO event-loop threads.
+    /// - `enableHttp2 = true` (default) enables HTTP/2 (`h2` over TLS ALPN and `h2c` upgrade) alongside HTTP/1.1.
     /// - `maxBodyBytes` caps incoming request body size (default 10 MiB; `<= 0` disables).
     /// - `readTimeoutMs` caps incoming request body reads (default 15s -> `408 Request Timeout`; `<= 0` disables).
     /// - `handlerTimeoutMs` caps handler execution time (default 30s -> `504 Gateway Timeout`; `<= 0` disables).
@@ -17,6 +19,8 @@ pub mod Weft.ServerConfig {
             host                 = String,
             port                 = Int32,
             backlog              = Int32,
+            ioThreads            = Int32,
+            enableHttp2          = Bool,
             maxBodyBytes         = Int32,
             exposeInternalErrors = Bool,
             readTimeoutMs        = Int64,
@@ -36,6 +40,8 @@ pub mod Weft.ServerConfig {
             host                 = "127.0.0.1",
             port                 = 8080,
             backlog              = 128,
+            ioThreads            = 0,
+            enableHttp2          = true,
             maxBodyBytes         = defaultMaxBodyBytes(),
             exposeInternalErrors = false,
             readTimeoutMs        = defaultReadTimeoutMs(),
@@ -50,16 +56,18 @@ pub mod Weft.ServerConfig {
     pub def local(p: Int32): ServerConfig =
         default() |> withHost("127.0.0.1") |> withPort(p)
 
-    pub def host(cfg: ServerConfig): String              = let ServerConfig.ServerConfig(r) = cfg; r#host
-    pub def port(cfg: ServerConfig): Int32               = let ServerConfig.ServerConfig(r) = cfg; r#port
-    pub def backlog(cfg: ServerConfig): Int32            = let ServerConfig.ServerConfig(r) = cfg; r#backlog
-    pub def maxBodyBytes(cfg: ServerConfig): Int32       = let ServerConfig.ServerConfig(r) = cfg; r#maxBodyBytes
-    pub def exposeInternalErrors(cfg: ServerConfig): Bool = let ServerConfig.ServerConfig(r) = cfg; r#exposeInternalErrors
-    pub def readTimeoutMs(cfg: ServerConfig): Int64      = let ServerConfig.ServerConfig(r) = cfg; r#readTimeoutMs
-    pub def handlerTimeoutMs(cfg: ServerConfig): Int64   = let ServerConfig.ServerConfig(r) = cfg; r#handlerTimeoutMs
+    pub def host(cfg: ServerConfig): String                = let ServerConfig.ServerConfig(r) = cfg; r#host
+    pub def port(cfg: ServerConfig): Int32                 = let ServerConfig.ServerConfig(r) = cfg; r#port
+    pub def backlog(cfg: ServerConfig): Int32              = let ServerConfig.ServerConfig(r) = cfg; r#backlog
+    pub def ioThreads(cfg: ServerConfig): Int32            = let ServerConfig.ServerConfig(r) = cfg; r#ioThreads
+    pub def enableHttp2(cfg: ServerConfig): Bool           = let ServerConfig.ServerConfig(r) = cfg; r#enableHttp2
+    pub def maxBodyBytes(cfg: ServerConfig): Int32         = let ServerConfig.ServerConfig(r) = cfg; r#maxBodyBytes
+    pub def exposeInternalErrors(cfg: ServerConfig): Bool  = let ServerConfig.ServerConfig(r) = cfg; r#exposeInternalErrors
+    pub def readTimeoutMs(cfg: ServerConfig): Int64        = let ServerConfig.ServerConfig(r) = cfg; r#readTimeoutMs
+    pub def handlerTimeoutMs(cfg: ServerConfig): Int64     = let ServerConfig.ServerConfig(r) = cfg; r#handlerTimeoutMs
     pub def shutdownGraceSeconds(cfg: ServerConfig): Int32 = let ServerConfig.ServerConfig(r) = cfg; r#shutdownGraceSeconds
-    pub def tls(cfg: ServerConfig): Option[TlsConfig]    = let ServerConfig.ServerConfig(r) = cfg; r#tls
-    pub def isTls(cfg: ServerConfig): Bool               = Option.nonEmpty(tls(cfg))
+    pub def tls(cfg: ServerConfig): Option[TlsConfig]      = let ServerConfig.ServerConfig(r) = cfg; r#tls
+    pub def isTls(cfg: ServerConfig): Bool                 = Option.nonEmpty(tls(cfg))
 
     pub def withHost(h: String, cfg: ServerConfig): ServerConfig =
         let ServerConfig.ServerConfig(r) = cfg;
@@ -72,6 +80,23 @@ pub mod Weft.ServerConfig {
     pub def withBacklog(b: Int32, cfg: ServerConfig): ServerConfig =
         let ServerConfig.ServerConfig(r) = cfg;
         ServerConfig.ServerConfig({ backlog = b | r })
+
+    ///
+    /// Sets the number of Undertow/XNIO NIO event-loop I/O threads.
+    /// Set to `<= 0` (the default) to automatically use all available CPU cores
+    /// (`Runtime.getRuntime().availableProcessors()`).
+    ///
+    pub def withIoThreads(n: Int32, cfg: ServerConfig): ServerConfig =
+        let ServerConfig.ServerConfig(r) = cfg;
+        ServerConfig.ServerConfig({ ioThreads = Int32.max(0, n) | r })
+
+    ///
+    /// Enables or disables HTTP/2 (`h2` over TLS ALPN and `h2c` upgrade) alongside HTTP/1.1.
+    /// Enabled (`true`) by default.
+    ///
+    pub def withHttp2(flag: Bool, cfg: ServerConfig): ServerConfig =
+        let ServerConfig.ServerConfig(r) = cfg;
+        ServerConfig.ServerConfig({ enableHttp2 = flag | r })
 
     ///
     /// Sets the maximum allowed incoming request body size in bytes (`413 Payload Too Large`).

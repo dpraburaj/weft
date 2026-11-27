@@ -25,11 +25,17 @@ mod TestServer {
     use Weft.WithStatus
 
     import java.lang.Exception
+    import java.lang.Runnable
+    import java.lang.Runtime
+    import java.lang.Thread
     import java.net.URI
     import java.net.http.HttpClient
+    import java.net.http.HttpClient$Version
     import java.net.http.HttpRequest
     import java.net.http.HttpRequest$BodyPublishers
     import java.net.http.HttpResponse$BodyHandlers
+    import java.util.concurrent.CountDownLatch
+    import java.util.concurrent.atomic.AtomicInteger
 
     def verifyToken(token: String): Option[Principal] = match token {
         case "secret-token" => Some(Principal.make("u-1", "alice", "writer" :: Nil))
@@ -205,6 +211,107 @@ mod TestServer {
                 match outcome {
                     case Ok(())   => ()
                     case Err(msg) => Assert.fail("Live binary/multipart HTTP request failed: ${msg}")
+                }
+        }
+    }
+
+    @Test
+    def testMultiEventLoopIoThreadsHttp2Head204AndParallelVirtualThreads(): Unit \ {Assert, IO} = {
+        let app = Router.empty()
+            |> Router.get("/ping", () -> Response.text("pong"))
+            |> Router.get("/empty", () -> Response.noContent())
+            |> Router.get("/work", () -> {
+                Thread.sleep(60i64);
+                Response.text("done")
+            })
+            |> Router.toApp
+            |> Middleware.errorJson;
+
+        let ioApp: App[IO] = req -> app(req);
+
+        // 1. Default ioThreads matches Runtime.availableProcessors()
+        let expectedCores = Int32.max(1, Runtime.getRuntime().availableProcessors());
+        match Server.start(ServerConfig.local(0), ioApp) {
+            case Err(msg) => Assert.fail("Failed to start default Undertow server: ${msg}")
+            case Ok(handle) =>
+                assertEq(expected = expectedCores, ServerHandle.ioThreads(handle));
+                ServerHandle.stop(0, handle)
+        };
+
+        // 2. Explicit ioThreads + HTTP/2 + HEAD/204 + parallel virtual-thread dispatch
+        let cfg = ServerConfig.local(0)
+            |> ServerConfig.withIoThreads(2)
+            |> ServerConfig.withHttp2(true);
+
+        match Server.start(cfg, ioApp) {
+            case Err(msg) => Assert.fail("Failed to start configured Undertow server: ${msg}")
+            case Ok(handle) =>
+                assertEq(expected = 2, ServerHandle.ioThreads(handle));
+                let outcome = try {
+                    let baseUrl = ServerHandle.url(handle);
+                    let client = HttpClient.newBuilder().version(HttpClient$Version.HTTP_2).build();
+                    let strHandler = HttpResponse$BodyHandlers.ofString();
+                    let noBody = HttpRequest$BodyPublishers.noBody();
+
+                    // GET over HTTP/2 (h2c upgrade)
+                    let pingReq = HttpRequest.newBuilder(URI.create("${baseUrl}/ping")).method("GET", noBody).build();
+                    let pingResp = client.send(pingReq, strHandler);
+                    let pingBody: String = pingResp.body();
+                    assertEq(expected = 200, pingResp.statusCode());
+                    assertEq(expected = "pong", pingBody);
+
+                    // HEAD returns 200 with empty body
+                    let headReq = HttpRequest.newBuilder(URI.create("${baseUrl}/ping")).method("HEAD", noBody).build();
+                    let headResp = client.send(headReq, strHandler);
+                    let headBody: String = headResp.body();
+                    assertEq(expected = 200, headResp.statusCode());
+                    assertEq(expected = "", headBody);
+
+                    // 204 No Content
+                    let emptyReq = HttpRequest.newBuilder(URI.create("${baseUrl}/empty")).method("GET", noBody).build();
+                    let emptyResp = client.send(emptyReq, strHandler);
+                    let emptyBody: String = emptyResp.body();
+                    assertEq(expected = 204, emptyResp.statusCode());
+                    assertEq(expected = "", emptyBody);
+
+                    // 8 concurrent blocking requests execute in parallel on virtual threads
+                    let total = 8;
+                    let latch = new CountDownLatch(total);
+                    let okCount = new AtomicInteger(0);
+                    def spawnWorkers(rem: Int32): Unit \ IO =
+                        if (rem <= 0) ()
+                        else {
+                            let _ = Thread.ofVirtual().start(new Runnable {
+                                def $run(_this: Runnable): Unit \ IO = {
+                                    try {
+                                        let wReq = HttpRequest.newBuilder(URI.create("${baseUrl}/work")).method("GET", noBody).build();
+                                        let wResp = client.send(wReq, strHandler);
+                                        let wBody: String = wResp.body();
+                                        if (wResp.statusCode() == 200 and wBody == "done") {
+                                            let _ = okCount.incrementAndGet();
+                                            ()
+                                        } else {
+                                            ()
+                                        }
+                                    } catch {
+                                        case _: Exception => ()
+                                    };
+                                    latch.countDown()
+                                }
+                            });
+                            spawnWorkers(rem - 1)
+                        };
+                    spawnWorkers(total);
+                    latch.await();
+                    assertEq(expected = total, okCount.get());
+                    Ok(())
+                } catch {
+                    case ex: Exception => Err(ex.getMessage())
+                };
+                ServerHandle.stop(0, handle);
+                match outcome {
+                    case Ok(())   => ()
+                    case Err(msg) => Assert.fail("Undertow multi-event-loop test failed: ${msg}")
                 }
         }
     }

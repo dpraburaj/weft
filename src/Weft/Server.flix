@@ -11,72 +11,141 @@ pub mod Weft.Server {
     use Weft.StreamWriter
     use Weft.TlsConfig
 
-    import com.sun.net.httpserver.HttpExchange
-    import com.sun.net.httpserver.HttpHandler
-    import com.sun.net.httpserver.HttpServer
-    import com.sun.net.httpserver.HttpsConfigurator
-    import com.sun.net.httpserver.HttpsServer
-    import com.sun.net.httpserver.{Headers => JHeaders}
+    import io.undertow.Undertow
+    import io.undertow.Undertow$ListenerInfo
+    import io.undertow.UndertowOptions
+    import io.undertow.server.HttpHandler
+    import io.undertow.server.HttpServerExchange
+    import io.undertow.server.handlers.GracefulShutdownHandler
+    import io.undertow.util.HeaderMap
+    import io.undertow.util.HeaderValues
+    import io.undertow.util.HttpString
     import java.io.ByteArrayOutputStream
-    import java.io.IOException
     import java.io.InputStream
+    import java.lang.{Boolean => JBoolean}
     import java.lang.Exception
+    import java.lang.Integer
     import java.lang.InterruptedException
+    import java.lang.{Long => JLong}
+    import java.lang.{Object => JObject}
     import java.lang.Runnable
     import java.lang.Runtime
     import java.lang.Thread
     import java.net.InetSocketAddress
     import java.nio.charset.StandardCharsets
     import java.util.concurrent.CountDownLatch
+    import java.util.concurrent.ExecutorService
     import java.util.concurrent.Executors
     import java.util.concurrent.TimeUnit
-    import java.util.{List => JList}
+    import java.util.logging.{Level => JulLevel}
+    import java.util.logging.{Logger => JulLogger}
+    import org.xnio.Options
+
+    def silenceRoutineServerLogs(): Unit \ IO = {
+        JulLogger.getLogger("io.undertow").setLevel(JulLevel.WARNING);
+        JulLogger.getLogger("org.xnio").setLevel(JulLevel.WARNING);
+        JulLogger.getLogger("org.jboss.xnio").setLevel(JulLevel.WARNING);
+        JulLogger.getLogger("org.jboss.threads").setLevel(JulLevel.WARNING);
+        JulLogger.getLogger("org.jboss.logging").setLevel(JulLevel.WARNING)
+    }
 
     ///
-    /// Starts the embedded HTTP/1.1 (or HTTPS when `ServerConfig.withTls` is set) server
-    /// on Java 21 virtual threads and returns immediately with a `ServerHandle`.
+    /// Starts the embedded Undertow HTTP/1.1 + HTTP/2 (or HTTPS when `ServerConfig.withTls`
+    /// is set) multi-event-loop server backed by Java 21 virtual threads and returns
+    /// immediately with a `ServerHandle`.
+    ///
+    /// Undertow's XNIO I/O event loops (defaulting to one per CPU core) handle socket
+    /// accept/read/write across all cores, then dispatch each incoming exchange onto its
+    /// own virtual thread so blocking Flix handlers and database calls never stall an
+    /// event-loop thread.
     ///
     /// Notice that `app` has type `App[IO]` (`Request -> Response \ IO`), so the Flix
     /// compiler statically guarantees that EVERY custom algebraic effect (`Req`, `Res`,
     /// `HttpError`, `Auth`, `Logger`, `Clock`, domain stores, etc.) has been handled!
     ///
     pub def start(cfg: ServerConfig, app: App[IO]): Result[String, ServerHandle] \ IO = {
+        silenceRoutineServerLogs();
         let ServerConfig.ServerConfig(c) = cfg;
-        let httpHandler = makeHttpHandler(
-            c#maxBodyBytes,
-            c#readTimeoutMs,
-            c#handlerTimeoutMs,
-            c#exposeInternalErrors,
-            app
-        );
-        match c#tls {
-            case None =>
-                try {
-                    let addr = new InetSocketAddress(c#host, c#port);
-                    let srv = HttpServer.create(addr, c#backlog);
-                    let _ctx = srv.createContext("/", httpHandler);
-                    srv.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
-                    srv.start();
-                    Ok(ServerHandle.Http(srv, c#host))
-                } catch {
-                    case ex: IOException => Err("Failed to start server on ${c#host}:${c#port}: ${ex.getMessage()}")
-                }
+        let resolvedIoThreads =
+            if (c#ioThreads > 0) c#ioThreads
+            else Int32.max(1, Runtime.getRuntime().availableProcessors());
+        let sslResult = match c#tls {
+            case None         => Ok(None)
             case Some(tlsCfg) =>
                 match TlsConfig.buildSslContext(tlsCfg) {
-                    case Err(tlsErr) => Err(tlsErr)
-                    case Ok(sslCtx) =>
-                        try {
-                            let addr = new InetSocketAddress(c#host, c#port);
-                            let srv = HttpsServer.create(addr, c#backlog);
-                            srv.setHttpsConfigurator(new HttpsConfigurator(sslCtx));
-                            let _ctx = srv.createContext("/", httpHandler);
-                            srv.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
-                            srv.start();
-                            Ok(ServerHandle.Https(srv, c#host))
-                        } catch {
-                            case ex: IOException => Err("Failed to start HTTPS server on ${c#host}:${c#port}: ${ex.getMessage()}")
-                        }
+                    case Ok(ctx)  => Ok(Some(ctx))
+                    case Err(err) => Err(err)
                 }
+        };
+        match sslResult {
+            case Err(tlsErr) => Err(tlsErr)
+            case Ok(sslCtxOpt) =>
+                let vExec = Executors.newVirtualThreadPerTaskExecutor();
+                let coreHandler = makeHttpHandler(
+                    c#maxBodyBytes,
+                    c#readTimeoutMs,
+                    c#handlerTimeoutMs,
+                    c#exposeInternalErrors,
+                    vExec,
+                    app
+                );
+                let graceful = new GracefulShutdownHandler(coreHandler);
+                try {
+                    let b0 = Undertow.builder();
+                    let b1 = b0.setIoThreads(resolvedIoThreads);
+                    let b2 = b1.setWorkerThreads(2);
+                    let b3 = b2.setSslEngineDelegatedTaskExecutor(vExec);
+                    let backlogObj: JObject = checked_cast(Integer.valueOf(Int32.max(1, c#backlog)));
+                    let maxEntityObj: JObject = checked_cast(JLong.valueOf(-1i64));
+                    let http2Obj: JObject = checked_cast(JBoolean.valueOf(true));
+                    let b4 = b3.setSocketOption(Options.BACKLOG, backlogObj);
+                    let b5 = b4.setServerOption(UndertowOptions.MAX_ENTITY_SIZE, maxEntityObj);
+                    let b6 = b5.setHandler(graceful);
+                    let b7 = if (c#enableHttp2)
+                        b6.setServerOption(UndertowOptions.ENABLE_HTTP2, http2Obj)
+                    else
+                        b6;
+                    let isTls = Option.nonEmpty(sslCtxOpt);
+                    let b8 = match sslCtxOpt {
+                        case None         => b7.addHttpListener(c#port, c#host)
+                        case Some(sslCtx) => b7.addHttpsListener(c#port, c#host, sslCtx)
+                    };
+                    let srv = b8.build();
+                    srv.start();
+                    let boundPort = extractBoundPort(srv, c#port);
+                    Ok(ServerHandle.ServerHandle({
+                        server    = srv,
+                        graceful  = graceful,
+                        executor  = vExec,
+                        host      = c#host,
+                        boundPort = boundPort,
+                        ioThreads = resolvedIoThreads,
+                        tls       = isTls
+                    }))
+                } catch {
+                    case ex: Exception =>
+                        try { vExec.shutdown() } catch { case _: Exception => () };
+                        let rawMsg = ex.getMessage();
+                        let msg = if (Object.isNull(rawMsg)) "Unexpected startup error" else rawMsg;
+                        let proto = if (Option.nonEmpty(sslCtxOpt)) "HTTPS" else "HTTP";
+                        Err("Failed to start ${proto} server on ${c#host}:${c#port}: ${msg}")
+                }
+        }
+    }
+
+    def extractBoundPort(srv: Undertow, fallbackPort: Int32): Int32 \ IO = {
+        let listeners = srv.getListenerInfo();
+        if (Object.isNull(listeners) or listeners.isEmpty())
+            fallbackPort
+        else {
+            let info: Undertow$ListenerInfo = listeners.get(0);
+            let addr = info.getAddress();
+            if (Object.isNull(addr))
+                fallbackPort
+            else {
+                let inet: InetSocketAddress = unchecked_cast(addr as InetSocketAddress);
+                inet.getPort()
+            }
         }
     }
 
@@ -196,7 +265,7 @@ pub mod Weft.Server {
             }
         }
 
-    // --- JDK HttpExchange <-> Weft Bridge ---
+    // --- Undertow HttpServerExchange <-> Weft Bridge ---
 
     enum ReadError {
         case TooLarge(String)
@@ -209,77 +278,123 @@ pub mod Weft.Server {
         readTimeoutMs: Int64,
         handlerTimeoutMs: Int64,
         exposeInternalErrors: Bool,
+        vExec: ExecutorService,
         app: App[IO]
     ): HttpHandler \ IO =
         new HttpHandler {
-            def handle(_this: HttpHandler, exchange: HttpExchange): Unit \ IO =
-                try {
-                    match readRequestWithTimeout(maxBodyBytes, readTimeoutMs, exchange) {
-                        case Ok(req) =>
-                            match runWithTimeout(handlerTimeoutMs, () -> app(req)) {
-                                case TimedOutcome.Completed(res) =>
-                                    writeResponse(req, res, exchange)
-                                case TimedOutcome.TimedOut =>
-                                    let timeoutRes = Response.text("Gateway Timeout: handler exceeded ${handlerTimeoutMs}ms")
-                                        |> Response.withStatus(Status.gatewayTimeout());
-                                    writeResponse(req, timeoutRes, exchange)
-                                case TimedOutcome.Failed(errMsg) =>
-                                    let bodyMsg = if (exposeInternalErrors)
-                                        "Internal Server Error: ${errMsg}"
-                                    else
-                                        "Internal Server Error";
-                                    let fallback = Response.text(bodyMsg)
-                                        |> Response.withStatus(Status.internalServerError());
-                                    writeResponse(req, fallback, exchange)
-                            }
-                        case Err(ReadError.TooLarge(limitMsg)) =>
-                            let tooLarge = Response.text(limitMsg)
-                                |> Response.withStatus(Status.payloadTooLarge());
-                            let dummyReq = Request.make(Method.parse(exchange.getRequestMethod()), "/");
-                            writeResponse(dummyReq, tooLarge, exchange)
-                        case Err(ReadError.ReadTimeout) =>
-                            let timedOut = Response.text("Request Timeout: reading request body exceeded ${readTimeoutMs}ms")
-                                |> Response.withStatus(Status.requestTimeout());
-                            let dummyReq = Request.make(Method.parse(exchange.getRequestMethod()), "/");
-                            writeResponse(dummyReq, timedOut, exchange)
-                        case Err(ReadError.ReadFailed(msg)) =>
-                            let bodyMsg = if (exposeInternalErrors) "Bad Request: ${msg}" else "Bad Request";
-                            let bad = Response.text(bodyMsg)
-                                |> Response.withStatus(Status.badRequest());
-                            let dummyReq = Request.make(Method.parse(exchange.getRequestMethod()), "/");
-                            writeResponse(dummyReq, bad, exchange)
-                    }
-                } catch {
-                    case ex: Exception =>
-                        try {
+            def handleRequest(_this: HttpHandler, exchange: HttpServerExchange): Unit \ IO =
+                if (exchange.isInIoThread()) {
+                    let _ = exchange.dispatch(vExec, new Runnable {
+                        def $run(_r: Runnable): Unit \ IO =
+                            processExchange(
+                                maxBodyBytes,
+                                readTimeoutMs,
+                                handlerTimeoutMs,
+                                exposeInternalErrors,
+                                app,
+                                exchange
+                            )
+                    });
+                    ()
+                } else {
+                    processExchange(
+                        maxBodyBytes,
+                        readTimeoutMs,
+                        handlerTimeoutMs,
+                        exposeInternalErrors,
+                        app,
+                        exchange
+                    )
+                }
+        }
+
+    def processExchange(
+        maxBodyBytes: Int32,
+        readTimeoutMs: Int64,
+        handlerTimeoutMs: Int64,
+        exposeInternalErrors: Bool,
+        app: App[IO],
+        exchange: HttpServerExchange
+    ): Unit \ IO =
+        try {
+            let _ = exchange.startBlocking();
+            match readRequestWithTimeout(maxBodyBytes, readTimeoutMs, exchange) {
+                case Ok(req) =>
+                    match runWithTimeout(handlerTimeoutMs, () -> app(req)) {
+                        case TimedOutcome.Completed(res) =>
+                            writeResponse(req, res, exchange)
+                        case TimedOutcome.TimedOut =>
+                            let timeoutRes = Response.text("Gateway Timeout: handler exceeded ${handlerTimeoutMs}ms")
+                                |> Response.withStatus(Status.gatewayTimeout());
+                            writeResponse(req, timeoutRes, exchange)
+                        case TimedOutcome.Failed(errMsg) =>
                             let bodyMsg = if (exposeInternalErrors)
-                                "Internal Server Error: ${ex.getMessage()}"
+                                "Internal Server Error: ${errMsg}"
                             else
                                 "Internal Server Error";
                             let fallback = Response.text(bodyMsg)
                                 |> Response.withStatus(Status.internalServerError());
-                            let dummyReq = Request.get("/");
-                            writeResponse(dummyReq, fallback, exchange)
-                        } catch {
-                            case _: Exception => ()
-                        }
+                            writeResponse(req, fallback, exchange)
+                    }
+                case Err(ReadError.TooLarge(limitMsg)) =>
+                    let tooLarge = Response.text(limitMsg)
+                        |> Response.withStatus(Status.payloadTooLarge());
+                    let dummyReq = Request.make(Method.parse(exchange.getRequestMethod().toString()), "/");
+                    writeResponse(dummyReq, tooLarge, exchange)
+                case Err(ReadError.ReadTimeout) =>
+                    let timedOut = Response.text("Request Timeout: reading request body exceeded ${readTimeoutMs}ms")
+                        |> Response.withStatus(Status.requestTimeout());
+                    let dummyReq = Request.make(Method.parse(exchange.getRequestMethod().toString()), "/");
+                    writeResponse(dummyReq, timedOut, exchange)
+                case Err(ReadError.ReadFailed(msg)) =>
+                    let bodyMsg = if (exposeInternalErrors) "Bad Request: ${msg}" else "Bad Request";
+                    let bad = Response.text(bodyMsg)
+                        |> Response.withStatus(Status.badRequest());
+                    let dummyReq = Request.make(Method.parse(exchange.getRequestMethod().toString()), "/");
+                    writeResponse(dummyReq, bad, exchange)
+            }
+        } catch {
+            case ex: Exception =>
+                try {
+                    if (not exchange.isResponseStarted()) {
+                        let rawMsg = ex.getMessage();
+                        let safeMsg = if (Object.isNull(rawMsg)) "Unhandled exception" else rawMsg;
+                        let bodyMsg = if (exposeInternalErrors)
+                            "Internal Server Error: ${safeMsg}"
+                        else
+                            "Internal Server Error";
+                        let fallback = Response.text(bodyMsg)
+                            |> Response.withStatus(Status.internalServerError());
+                        let dummyReq = Request.get("/");
+                        writeResponse(dummyReq, fallback, exchange)
+                    } else {
+                        let _ = exchange.endExchange();
+                        ()
+                    }
+                } catch {
+                    case _: Exception =>
+                        try { let _ = exchange.endExchange(); () } catch { case _: Exception => () }
                 }
         }
 
     def readRequestWithTimeout(
         maxBodyBytes: Int32,
         readTimeoutMs: Int64,
-        exchange: HttpExchange
+        exchange: HttpServerExchange
     ): Result[ReadError, Request] \ IO = {
-        let method = Method.parse(exchange.getRequestMethod());
-        let uri = exchange.getRequestURI();
-        let rawPath = uri.getRawPath();
-        let rawQueryObj = uri.getRawQuery();
-        let fullRawPath = if (Object.isNull(rawQueryObj)) rawPath else "${rawPath}?${rawQueryObj}";
+        let method = Method.parse(exchange.getRequestMethod().toString());
+        let rawPathObj = exchange.getRequestURI();
+        let rawPath = if (Object.isNull(rawPathObj)) "/" else rawPathObj;
+        let rawQueryObj = exchange.getQueryString();
+        let fullRawPath =
+            if (Object.isNull(rawQueryObj) or String.isEmpty(rawQueryObj)) rawPath
+            else "${rawPath}?${rawQueryObj}";
         let flixHeaders = readHeaders(exchange.getRequestHeaders());
         let contentLenOpt = match Headers.get("Content-Length", flixHeaders) {
             case Some(clStr) => Int64.fromString(String.trim(clStr))
-            case None        => None
+            case None =>
+                let cl = exchange.getRequestContentLength();
+                if (cl >= 0i64) Some(cl) else None
         };
         let hasTransferEnc = Option.nonEmpty(Headers.get("Transfer-Encoding", flixHeaders));
         let declaredTooLarge = if (maxBodyBytes > 0) {
@@ -293,23 +408,27 @@ pub mod Weft.Server {
         if (declaredTooLarge)
             Err(ReadError.TooLarge("Request body exceeds maximum allowed size of ${maxBodyBytes} bytes"))
         else {
-            let hasBody = hasTransferEnc or match contentLenOpt {
-                case Some(cl) => cl > 0i64
-                case None     => false
-            };
+            let hasBody =
+                hasTransferEnc
+                or (not exchange.isRequestComplete())
+                or match contentLenOpt {
+                    case Some(cl) => cl > 0i64
+                    case None     => false
+                };
             if (not hasBody) {
                 Ok(
                     Request.make(method, fullRawPath)
                         |> Request.withHeaders(flixHeaders)
                 )
             } else {
-                match runWithTimeout(readTimeoutMs, () -> readBoundedBytes(exchange.getRequestBody(), maxBodyBytes)) {
+                match runWithTimeout(readTimeoutMs, () -> readBoundedBytes(exchange.getInputStream(), maxBodyBytes)) {
                     case TimedOutcome.Completed(Ok(bodyVec)) =>
-                        Ok(
-                            Request.make(method, fullRawPath)
-                                |> Request.withHeaders(flixHeaders)
-                                |> Request.withBytes(bodyVec)
-                        )
+                        let baseReq = Request.make(method, fullRawPath)
+                            |> Request.withHeaders(flixHeaders);
+                        if (Vector.isEmpty(bodyVec))
+                            Ok(baseReq)
+                        else
+                            Ok(Request.withBytes(bodyVec, baseReq))
                     case TimedOutcome.Completed(Err(msg)) => Err(ReadError.TooLarge(msg))
                     case TimedOutcome.TimedOut           => Err(ReadError.ReadTimeout)
                     case TimedOutcome.Failed(msg)        => Err(ReadError.ReadFailed(msg))
@@ -342,48 +461,52 @@ pub mod Weft.Server {
             loop(0)
         }
 
-    def readHeaders(jHeaders: JHeaders): Headers \ IO =
-        let keyIter = jHeaders.keySet().iterator();
-        def loopKeys(acc: Headers): Headers \ IO = {
-            if (keyIter.hasNext()) {
-                let key: String = keyIter.next();
-                let values: JList[String] = jHeaders.get(key);
-                let nextAcc = if (Object.isNull(values))
-                    acc
-                else {
-                    let valIter = values.iterator();
-                    def loopVals(hAcc: Headers): Headers \ IO = {
-                        if (valIter.hasNext()) {
-                            let v: String = valIter.next();
-                            loopVals(Headers.add(key, v, hAcc))
-                        } else {
-                            hAcc
-                        }
-                    };
-                    loopVals(acc)
+    def readHeaders(jHeaders: HeaderMap): Headers \ IO = {
+        let iter = jHeaders.iterator();
+        def loopHeaders(acc: Headers): Headers \ IO = {
+            if (iter.hasNext()) {
+                let hv: HeaderValues = iter.next();
+                let key = hv.getHeaderName().toString();
+                let valIter = hv.iterator();
+                def loopVals(hAcc: Headers): Headers \ IO = {
+                    if (valIter.hasNext()) {
+                        let v: String = valIter.next();
+                        loopVals(Headers.add(key, v, hAcc))
+                    } else {
+                        hAcc
+                    }
                 };
-                loopKeys(nextAcc)
+                loopHeaders(loopVals(acc))
             } else {
                 acc
             }
         };
-        loopKeys(Headers.empty())
+        loopHeaders(Headers.empty())
+    }
 
-    def writeResponse(req: Request, res: Response, exchange: HttpExchange): Unit \ IO =
-        let respHeaders = exchange.getResponseHeaders();
-        List.forEach(match (k, v) -> respHeaders.add(k, v), Headers.toList(Response.headers(res)));
+    def writeResponse(req: Request, res: Response, exchange: HttpServerExchange): Unit \ IO = {
         let statusCode = Status.code(Response.status(res));
+        let _ = exchange.setStatusCode(statusCode);
+        let respHeaders = exchange.getResponseHeaders();
+        List.forEach(match (k, v) -> {
+            let hs = HttpString.tryFromString(k);
+            if (not Object.isNull(hs)) {
+                let _ = respHeaders.add(hs, v);
+                ()
+            } else {
+                ()
+            }
+        }, Headers.toList(Response.headers(res)));
         let isHead = Request.method(req) == Method.Head;
         let noBodyStatus = statusCode == 204 or statusCode == 304 or isHead;
         if (noBodyStatus) {
-            exchange.sendResponseHeaders(statusCode, -1i64);
-            exchange.close()
+            let _ = exchange.endExchange();
+            ()
         } else {
             match Response.bodyValue(res) {
                 case Body.Stream(streamFn) =>
-                    // 0i64 enables HTTP/1.1 Transfer-Encoding: chunked in JDK HttpServer
-                    exchange.sendResponseHeaders(statusCode, 0i64);
-                    let out = exchange.getResponseBody();
+                    // Leaving Content-Length unset enables HTTP/1.1 chunked transfer and HTTP/2 DATA frames
+                    let out = exchange.getOutputStream();
                     let writer = StreamWriter.make(
                         bs -> out.write(Vector.toArray(Static, bs)),
                         () -> out.flush()
@@ -395,34 +518,44 @@ pub mod Weft.Server {
                     } catch {
                         case _: Exception =>
                             try { out.close() } catch { case _: Exception => () }
-                    }
+                    };
+                    let _ = exchange.endExchange();
+                    ()
                 case Body.Empty =>
-                    exchange.sendResponseHeaders(statusCode, -1i64);
-                    exchange.close()
+                    let _ = exchange.setResponseContentLength(0i64);
+                    let _ = exchange.endExchange();
+                    ()
                 case Body.Text(s) =>
                     if (String.isEmpty(s)) {
-                        exchange.sendResponseHeaders(statusCode, -1i64);
-                        exchange.close()
+                        let _ = exchange.setResponseContentLength(0i64);
+                        let _ = exchange.endExchange();
+                        ()
                     } else {
                         let bodyBytes = s.getBytes(StandardCharsets.UTF_8);
-                        exchange.sendResponseHeaders(statusCode, Int32.toInt64(Array.length(bodyBytes)));
-                        let out = exchange.getResponseBody();
+                        let _ = exchange.setResponseContentLength(Int32.toInt64(Array.length(bodyBytes)));
+                        let out = exchange.getOutputStream();
                         out.write(bodyBytes);
-                        out.close()
+                        out.close();
+                        let _ = exchange.endExchange();
+                        ()
                     }
                 case Body.Bytes(bodyVec) =>
                     let len = Vector.length(bodyVec);
                     if (len == 0) {
-                        exchange.sendResponseHeaders(statusCode, -1i64);
-                        exchange.close()
+                        let _ = exchange.setResponseContentLength(0i64);
+                        let _ = exchange.endExchange();
+                        ()
                     } else {
                         let bodyBytes = Vector.toArray(Static, bodyVec);
-                        exchange.sendResponseHeaders(statusCode, Int32.toInt64(len));
-                        let out = exchange.getResponseBody();
+                        let _ = exchange.setResponseContentLength(Int32.toInt64(len));
+                        let out = exchange.getOutputStream();
                         out.write(bodyBytes);
-                        out.close()
+                        out.close();
+                        let _ = exchange.endExchange();
+                        ()
                     }
             }
         }
+    }
 
 }
