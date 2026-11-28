@@ -131,7 +131,7 @@ mod TestInfraEffects {
             |> Middleware.throttle(RateLimitConfig.make(2, 60000i64));
 
         run {
-            let req1 = Request.get("/ping") |> Request.withHeader("X-Forwarded-For", "10.0.0.1, 10.0.0.2");
+            let req1 = Request.get("/ping") |> Request.withRemoteAddr("10.0.0.1");
             let r1 = app(req1);
             assertEq(expected = Status.ok(), Response.status(r1));
             assertEq(expected = Some("2"), Response.header("X-RateLimit-Limit", r1));
@@ -154,7 +154,7 @@ mod TestInfraEffects {
 
             // Route-level throttle on /secret with separate IP passes global limit, blocked on 2nd /secret call
             let sReq = Request.get("/secret")
-                |> Request.withHeader("X-Real-IP", "10.0.0.99")
+                |> Request.withRemoteAddr("10.0.0.99")
                 |> Request.withHeader("X-Api-Key", "k1");
             assertEq(expected = Status.ok(), Response.status(app(sReq)));
             assertEq(expected = Status.tooManyRequests(), Response.status(app(sReq)))

@@ -63,7 +63,12 @@ mod TestServer {
             |> Router.withMiddleware(Middleware.bearerAuth(verifyToken));
 
         let app = Router.empty()
-            |> Router.get("/health", () -> Json.obj(("service", Json.str("Weft")) :: ("ok", Json.bool(true)) :: Nil))
+            |> Router.get("/health", () -> Json.obj(
+                ("service", Json.str("Weft")) ::
+                ("ok", Json.bool(true)) ::
+                ("peer", Json.str(Option.getWithDefault("", Req.remoteAddr()))) ::
+                Nil
+            ))
             |> Router.scope("/api", protectedRoutes)
             |> Router.toApp
             |> Middleware.errorJson
@@ -92,6 +97,7 @@ mod TestServer {
                     let getBody: String = getResp.body();
                     assertEq(expected = 200, getResp.statusCode());
                     assertTrue(String.contains({substr = "\"service\":\"Weft\""}, getBody));
+                    assertTrue(String.contains({substr = "\"peer\":\"127.0.0.1\""}, getBody));
 
                     // 2. Live POST /api/echo/v1 without auth -> 401
                     let bodyPub = HttpRequest$BodyPublishers.ofString("{\"message\":\"hello weft\"}");

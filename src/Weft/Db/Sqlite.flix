@@ -10,6 +10,7 @@ pub mod Weft.Db.Sqlite {
     use Weft.DbErrorKind
 
     import java.lang.Exception
+    import java.lang.Throwable
     import java.sql.Connection
     import java.sql.SQLException
     import java.util.Properties
@@ -126,109 +127,160 @@ pub mod Weft.Db.Sqlite {
         let SqliteDb.SqliteDb(lock, conn, txDepth, readerPoolOpt) = db;
         region rc {
             let inTx = Ref.fresh(rc, false);
-            run {
-                f()
-            } with handler Db {
-                def rawQueryRows(sql, params, k) = {
-                    let res = match (Ref.get(inTx), readerPoolOpt) {
-                        case (false, Some(rp)) =>
-                            ConnectionPool.withConnection(rp, rConn -> Jdbc.doQuery(true, rConn, sql, params))
-                        case _ =>
-                            execLocked(lock, () -> Jdbc.doQuery(true, conn, sql, params))
-                    };
-                    k(res)
-                }
+            let heldLocks = Ref.fresh(rc, 0);
 
-                def rawExecute(sql, params, k) =
-                    k(execLocked(lock, () -> Jdbc.doExecute(true, conn, sql, params)))
+            def unlockMany(n: Int32): Unit \ IO =
+                if (n <= 0) ()
+                else {
+                    try { lock.unlock() } catch { case _: Exception => () };
+                    unlockMany(n - 1)
+                };
 
-                def rawInsertAndGetId(sql, params, k) =
-                    k(execLocked(lock, () -> Jdbc.doInsertAndGetIdSqlite(conn, sql, params)))
-
-                def rawBeginTx(k) = {
-                    lock.lock();
-                    let depth = Ref.get(txDepth);
-                    let beginRes = try {
-                        if (depth == 0) {
-                            conn.setAutoCommit(false);
-                            Ref.put(1, txDepth);
-                            Ref.put(true, inTx);
-                            Ok(())
-                        } else {
-                            Jdbc.execRaw(conn, "SAVEPOINT _weft_sp_${depth}");
-                            Ref.put(depth + 1, txDepth);
-                            Ref.put(true, inTx);
-                            Ok(())
-                        }
-                    } catch {
-                        case ex: SQLException =>
-                            lock.unlock();
-                            Err((DbErrorKind.TransactionFailed, "Failed to begin transaction: ${ex.getMessage()}"))
-                    };
-                    k(beginRes)
-                }
-
-                def rawCommitTx(k) = {
-                    let depth = Ref.get(txDepth);
-                    let commitRes = try {
-                        if (depth <= 1) {
-                            conn.commit();
-                            conn.setAutoCommit(true);
-                            Ref.put(0, txDepth);
-                            Ref.put(false, inTx);
-                            lock.unlock();
-                            Ok(())
-                        } else {
-                            let spLevel = depth - 1;
-                            Jdbc.execRaw(conn, "RELEASE SAVEPOINT _weft_sp_${spLevel}");
-                            Ref.put(spLevel, txDepth);
-                            lock.unlock();
-                            Ok(())
-                        }
-                    } catch {
-                        case ex: SQLException =>
-                            if (depth <= 1) {
-                                Jdbc.safeRestoreAutoCommit(conn);
-                                Ref.put(0, txDepth);
-                                Ref.put(false, inTx)
-                            } else {
-                                Ref.put(depth - 1, txDepth)
-                            };
-                            lock.unlock();
-                            Err((DbErrorKind.TransactionFailed, "Failed to commit transaction: ${ex.getMessage()}"))
-                    };
-                    k(commitRes)
-                }
-
-                def rawRollbackTx(k) = {
-                    let depth = Ref.get(txDepth);
+            def cleanupLeakedTx(): Unit \ {rc, IO} = {
+                let held = Ref.get(heldLocks);
+                if (held > 0) {
+                    Ref.put(0, heldLocks);
+                    Ref.put(false, inTx);
                     try {
-                        if (depth <= 1) {
-                            conn.rollback();
-                            conn.setAutoCommit(true);
-                            Ref.put(0, txDepth);
-                            Ref.put(false, inTx);
-                            lock.unlock()
-                        } else {
-                            let spLevel = depth - 1;
-                            Jdbc.execRaw(conn, "ROLLBACK TO SAVEPOINT _weft_sp_${spLevel}");
-                            Jdbc.execRaw(conn, "RELEASE SAVEPOINT _weft_sp_${spLevel}");
-                            Ref.put(spLevel, txDepth);
-                            lock.unlock()
-                        }
+                        conn.rollback()
                     } catch {
-                        case _: Exception =>
-                            if (depth <= 1) {
-                                Jdbc.safeRestoreAutoCommit(conn);
-                                Ref.put(0, txDepth);
-                                Ref.put(false, inTx)
-                            } else {
-                                Ref.put(depth - 1, txDepth)
-                            };
-                            lock.unlock()
+                        case _: Exception => ()
                     };
-                    k()
+                    Jdbc.safeRestoreAutoCommit(conn);
+                    Ref.put(0, txDepth);
+                    unlockMany(held)
+                } else {
+                    ()
                 }
+            };
+
+            try {
+                let out = run {
+                    f()
+                } with handler Db {
+                    def rawQueryRows(sql, params, k) = {
+                        let res = match (Ref.get(inTx), readerPoolOpt) {
+                            case (false, Some(rp)) =>
+                                ConnectionPool.withConnection(rp, rConn -> Jdbc.doQuery(true, rConn, sql, params))
+                            case _ =>
+                                execLocked(lock, () -> Jdbc.doQuery(true, conn, sql, params))
+                        };
+                        k(res)
+                    }
+
+                    def rawExecute(sql, params, k) =
+                        k(execLocked(lock, () -> Jdbc.doExecute(true, conn, sql, params)))
+
+                    def rawInsertAndGetId(sql, params, k) =
+                        k(execLocked(lock, () -> Jdbc.doInsertAndGetIdSqlite(conn, sql, params)))
+
+                    def rawBeginTx(k) = {
+                        lock.lock();
+                        let depth = Ref.get(txDepth);
+                        let beginRes = try {
+                            if (depth == 0) {
+                                conn.setAutoCommit(false);
+                                Ref.put(1, txDepth);
+                                Ref.put(true, inTx);
+                                Ref.transform(n -> n + 1, heldLocks);
+                                Ok(())
+                            } else {
+                                Jdbc.execRaw(conn, "SAVEPOINT _weft_sp_${depth}");
+                                Ref.put(depth + 1, txDepth);
+                                Ref.put(true, inTx);
+                                Ref.transform(n -> n + 1, heldLocks);
+                                Ok(())
+                            }
+                        } catch {
+                            case ex: SQLException =>
+                                lock.unlock();
+                                Err((DbErrorKind.TransactionFailed, "Failed to begin transaction: ${ex.getMessage()}"))
+                        };
+                        k(beginRes)
+                    }
+
+                    def rawCommitTx(k) = {
+                        if (Ref.get(heldLocks) <= 0) {
+                            k(Err((DbErrorKind.TransactionFailed, "No active transaction to commit")))
+                        } else {
+                            let depth = Ref.get(txDepth);
+                            let commitRes = try {
+                                if (depth <= 1) {
+                                    conn.commit();
+                                    conn.setAutoCommit(true);
+                                    Ref.put(0, txDepth);
+                                    Ref.put(false, inTx);
+                                    Ref.transform(n -> Int32.max(0, n - 1), heldLocks);
+                                    lock.unlock();
+                                    Ok(())
+                                } else {
+                                    let spLevel = depth - 1;
+                                    Jdbc.execRaw(conn, "RELEASE SAVEPOINT _weft_sp_${spLevel}");
+                                    Ref.put(spLevel, txDepth);
+                                    Ref.transform(n -> Int32.max(0, n - 1), heldLocks);
+                                    lock.unlock();
+                                    Ok(())
+                                }
+                            } catch {
+                                case ex: SQLException =>
+                                    if (depth <= 1) {
+                                        Jdbc.safeRestoreAutoCommit(conn);
+                                        Ref.put(0, txDepth);
+                                        Ref.put(false, inTx)
+                                    } else {
+                                        Ref.put(depth - 1, txDepth)
+                                    };
+                                    Ref.transform(n -> Int32.max(0, n - 1), heldLocks);
+                                    lock.unlock();
+                                    Err((DbErrorKind.TransactionFailed, "Failed to commit transaction: ${ex.getMessage()}"))
+                            };
+                            k(commitRes)
+                        }
+                    }
+
+                    def rawRollbackTx(k) = {
+                        if (Ref.get(heldLocks) <= 0) {
+                            k()
+                        } else {
+                            let depth = Ref.get(txDepth);
+                            try {
+                                if (depth <= 1) {
+                                    conn.rollback();
+                                    conn.setAutoCommit(true);
+                                    Ref.put(0, txDepth);
+                                    Ref.put(false, inTx);
+                                    Ref.transform(n -> Int32.max(0, n - 1), heldLocks);
+                                    lock.unlock()
+                                } else {
+                                    let spLevel = depth - 1;
+                                    Jdbc.execRaw(conn, "ROLLBACK TO SAVEPOINT _weft_sp_${spLevel}");
+                                    Jdbc.execRaw(conn, "RELEASE SAVEPOINT _weft_sp_${spLevel}");
+                                    Ref.put(spLevel, txDepth);
+                                    Ref.transform(n -> Int32.max(0, n - 1), heldLocks);
+                                    lock.unlock()
+                                }
+                            } catch {
+                                case _: Exception =>
+                                    if (depth <= 1) {
+                                        Jdbc.safeRestoreAutoCommit(conn);
+                                        Ref.put(0, txDepth);
+                                        Ref.put(false, inTx)
+                                    } else {
+                                        Ref.put(depth - 1, txDepth)
+                                    };
+                                    Ref.transform(n -> Int32.max(0, n - 1), heldLocks);
+                                    lock.unlock()
+                            };
+                            k()
+                        }
+                    }
+                };
+                cleanupLeakedTx();
+                out
+            } catch {
+                case ex: Throwable =>
+                    cleanupLeakedTx();
+                    throw ex
             }
         }
     }

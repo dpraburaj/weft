@@ -382,26 +382,54 @@ pub mod Weft.Middleware {
     }
 
     ///
-    /// Handles CORS preflight `OPTIONS` requests and attaches CORS response headers.
+    /// Handles CORS preflight `OPTIONS` requests and attaches RFC-compliant CORS response headers.
+    ///
+    /// - Wildcard (`"*"`) emits `Access-Control-Allow-Origin: *` and never combines `*` with
+    ///   `Access-Control-Allow-Credentials: true` (per Fetch specification).
+    /// - Explicit origin allowlists (`CorsConfig.origins(...)` / `withOrigin`) reflect only
+    ///   matching `Origin` headers and emit `Vary: Origin` to prevent cache poisoning.
     ///
     pub def cors(cfg: CorsConfig, app: App[ef]): App[ef] = req -> {
         let CorsConfig.CorsConfig(c) = cfg;
-        def applyCors(res) = {
-            let r1 = res
-                |> Response.withHeader("Access-Control-Allow-Origin", c#allowOrigin)
-                |> Response.withHeader("Access-Control-Allow-Methods", String.intercalate(", ", c#allowMethods))
-                |> Response.withHeader("Access-Control-Allow-Headers", String.intercalate(", ", c#allowHeaders));
-            let r2 = if (List.isEmpty(c#exposeHeaders)) r1
-                else Response.withHeader("Access-Control-Expose-Headers", String.intercalate(", ", c#exposeHeaders), r1);
-            let r3 = if (c#allowCredentials)
-                Response.withHeader("Access-Control-Allow-Credentials", "true", r2)
-                else r2;
-            match c#maxAgeSeconds {
-                case Some(secs) => Response.withHeader("Access-Control-Max-Age", "${secs}", r3)
-                case None       => r3
+        let isWildcard = List.exists(o -> o == "*", c#allowOrigins);
+        let reqOriginOpt = Request.header("Origin", req);
+        let matchedOriginOpt = if (isWildcard) {
+            Some("*")
+        } else {
+            match reqOriginOpt {
+                case Some(origin) =>
+                    if (List.exists(allowed -> allowed == origin, c#allowOrigins))
+                        Some(origin)
+                    else
+                        None
+                case None =>
+                    None
             }
         };
-        if (Request.method(req) == Method.Options)
+
+        def applyCors(res) = {
+            let base = if (not isWildcard) appendVary("Origin", res) else res;
+            match matchedOriginOpt {
+                case None => base
+                case Some(allowVal) =>
+                    let r1 = base
+                        |> Response.withHeader("Access-Control-Allow-Origin", allowVal)
+                        |> Response.withHeader("Access-Control-Allow-Methods", String.intercalate(", ", c#allowMethods))
+                        |> Response.withHeader("Access-Control-Allow-Headers", String.intercalate(", ", c#allowHeaders));
+                    let r2 = if (List.isEmpty(c#exposeHeaders)) r1
+                        else Response.withHeader("Access-Control-Expose-Headers", String.intercalate(", ", c#exposeHeaders), r1);
+                    let r3 = if (c#allowCredentials and allowVal != "*")
+                        Response.withHeader("Access-Control-Allow-Credentials", "true", r2)
+                        else r2;
+                    match c#maxAgeSeconds {
+                        case Some(secs) => Response.withHeader("Access-Control-Max-Age", "${secs}", r3)
+                        case None       => r3
+                    }
+            }
+        };
+
+        let isCorsPreflight = Request.method(req) == Method.Options and (isWildcard or Option.nonEmpty(reqOriginOpt));
+        if (isCorsPreflight)
             applyCors(Response.noContent())
         else
             applyCors(app(req))
@@ -416,6 +444,66 @@ pub mod Weft.Middleware {
             |> Response.withHeader("X-Content-Type-Options", "nosniff")
             |> Response.withHeader("X-Frame-Options", "DENY")
             |> Response.withHeader("Referrer-Policy", "no-referrer")
+
+    ///
+    /// Attaches hardened production HTTP security headers including optional HSTS
+    /// (`Strict-Transport-Security`), optional `Content-Security-Policy`, and a restrictive
+    /// `Permissions-Policy`.
+    ///
+    pub def securityHeadersWith(
+        hstsMaxAgeSecs: Option[Int32],
+        csp: Option[String],
+        app: App[ef]
+    ): App[ef] = req -> {
+        let r0 = app(req)
+            |> Response.withHeader("X-Content-Type-Options", "nosniff")
+            |> Response.withHeader("X-Frame-Options", "DENY")
+            |> Response.withHeader("Referrer-Policy", "no-referrer")
+            |> Response.withHeader("Permissions-Policy", "geolocation=(), microphone=(), camera=()");
+        let r1 = match hstsMaxAgeSecs {
+            case Some(secs) if secs > 0 =>
+                Response.withHeader("Strict-Transport-Security", "max-age=${secs}; includeSubDomains", r0)
+            case _ => r0
+        };
+        match csp {
+            case Some(policy) if not String.isEmpty(String.trim(policy)) =>
+                Response.withHeader("Content-Security-Policy", policy, r1)
+            case _ => r1
+        }
+    }
+
+    ///
+    /// Propagates a safe inbound `X-Request-Id` header (or generates a fresh 16-byte random ID),
+    /// attaching it to both the incoming `Request` (visible via `Req.header("X-Request-Id")`)
+    /// and the outgoing `Response` for distributed tracing and log correlation.
+    ///
+    pub def requestId(app: App[ef]): App[ef + Random] = req -> {
+        let rid = match Request.header("X-Request-Id", req) {
+            case Some(existing) if isValidRequestId(existing) => String.trim(existing)
+            case _                                            => Random.tokenBase64Url(16)
+        };
+        let reqWithId = Request.withHeader("X-Request-Id", rid, req);
+        app(reqWithId) |> Response.withHeader("X-Request-Id", rid)
+    }
+
+    def isValidRequestId(raw: String): Bool = {
+        let s = String.trim(raw);
+        let len = String.length(s);
+        if (len == 0 or len > 128)
+            false
+        else {
+            def loop(i: Int32): Bool =
+                if (i >= len) true
+                else {
+                    let c = String.charAt(i, s);
+                    if (Char.isLetterOrDigit(c) or c == '-' or c == '_' or c == '.')
+                        loop(i + 1)
+                    else
+                        false
+                };
+            loop(0)
+        }
+    }
 
     ///
     /// Sets a static response header on every response.
@@ -483,23 +571,30 @@ pub mod Weft.Middleware {
     }
 
     def appendVaryAcceptEncoding(res: Response): Response =
+        appendVary("Accept-Encoding", res)
+
+    def appendVary(headerToken: String, res: Response): Response =
+        let lowerTarget = String.toLowerCase(headerToken);
         match Response.header("Vary", res) {
             case None =>
-                Response.withHeader("Vary", "Accept-Encoding", res)
+                Response.withHeader("Vary", headerToken, res)
             case Some(existing) =>
                 let already = String.splitOn({substr = ","}, existing)
                     |> List.exists(tok -> {
                         let t = String.toLowerCase(String.trim(tok));
-                        t == "accept-encoding" or t == "*"
+                        t == lowerTarget or t == "*"
                     });
-                if (already) res else Response.withHeader("Vary", "${existing}, Accept-Encoding", res)
+                if (already) res else Response.withHeader("Vary", "${existing}, ${headerToken}", res)
         }
 
     // --- Rate Limiting / Throttling Middleware ---
 
     ///
-    /// App-level rate-limiting middleware keyed by client IP (`X-Forwarded-For` first entry,
-    /// `X-Real-IP`, or `"global"` fallback).
+    /// App-level rate-limiting middleware keyed safely by the direct peer socket IP
+    /// (`Request.remoteAddr`, falling back to `"unknown"`).
+    ///
+    /// Does NOT blindly trust spoofable `X-Forwarded-For` / `X-Real-IP` headers.
+    /// If running behind a reverse proxy (Nginx/Caddy/ALB), use `Middleware.throttleTrustedProxy`.
     ///
     /// Attaches `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset` to every
     /// response, and returns `429 Too Many Requests` with `Retry-After` when exceeded
@@ -507,6 +602,19 @@ pub mod Weft.Middleware {
     ///
     pub def throttle(cfg: RateLimitConfig, app: App[ef]): App[ef + {RateLimiter, Clock}] =
         throttleBy(cfg, defaultThrottleKey, app)
+
+    ///
+    /// App-level rate-limiting middleware for deployments behind known reverse proxies.
+    /// Only inspects `X-Forwarded-For` / `X-Real-IP` when `Request.remoteAddr` matches an
+    /// entry in `trustedProxies` (e.g. `"127.0.0.1" :: "10.0.0.1" :: Nil`); otherwise uses
+    /// the direct socket peer IP to prevent header spoofing.
+    ///
+    pub def throttleTrustedProxy(
+        trustedProxies: List[String],
+        cfg: RateLimitConfig,
+        app: App[ef]
+    ): App[ef + {RateLimiter, Clock}] =
+        throttleBy(cfg, req -> Option.getWithDefault("unknown", Request.clientIp(trustedProxies, req)), app)
 
     ///
     /// App-level rate-limiting middleware using a custom key extractor `keyFn`
@@ -547,22 +655,7 @@ pub mod Weft.Middleware {
     }
 
     def defaultThrottleKey(req: Request): String =
-        match Request.header("X-Forwarded-For", req) {
-            case Some(raw) =>
-                match List.head(String.splitOn({substr = ","}, raw)) {
-                    case Some(first) =>
-                        let trimmed = String.trim(first);
-                        if (String.isEmpty(trimmed)) "global" else trimmed
-                    case None => "global"
-                }
-            case None =>
-                match Request.header("X-Real-IP", req) {
-                    case Some(ip) =>
-                        let trimmed = String.trim(ip);
-                        if (String.isEmpty(trimmed)) "global" else trimmed
-                    case None => "global"
-                }
-        }
+        Option.getWithDefault("unknown", Request.remoteAddr(req))
 
     def tooManyRequestsResponse(req: Request, decision: RateLimitDecision): Response = {
         let secs = RateLimitDecision.retryAfterSeconds(decision);

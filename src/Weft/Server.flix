@@ -30,7 +30,9 @@ pub mod Weft.Server {
     import java.lang.{Object => JObject}
     import java.lang.Runnable
     import java.lang.Runtime
+    import java.lang.System
     import java.lang.Thread
+    import java.lang.Throwable
     import java.net.InetSocketAddress
     import java.nio.charset.StandardCharsets
     import java.util.concurrent.CountDownLatch
@@ -41,13 +43,28 @@ pub mod Weft.Server {
     import java.util.logging.{Logger => JulLogger}
     import org.xnio.Options
 
-    def silenceRoutineServerLogs(): Unit \ IO = {
-        JulLogger.getLogger("io.undertow").setLevel(JulLevel.WARNING);
-        JulLogger.getLogger("org.xnio").setLevel(JulLevel.WARNING);
-        JulLogger.getLogger("org.jboss.xnio").setLevel(JulLevel.WARNING);
-        JulLogger.getLogger("org.jboss.threads").setLevel(JulLevel.WARNING);
-        JulLogger.getLogger("org.jboss.logging").setLevel(JulLevel.WARNING)
+    def silenceRoutineServerLogs(): List[JulLogger] \ IO = {
+        let _ = System.setProperty("jboss.log-version", "false");
+        let l1 = JulLogger.getLogger("io.undertow");
+        let l2 = JulLogger.getLogger("org.xnio");
+        let l3 = JulLogger.getLogger("org.jboss.xnio");
+        let l4 = JulLogger.getLogger("org.jboss.threads");
+        let l5 = JulLogger.getLogger("org.jboss.threads.version");
+        let l6 = JulLogger.getLogger("org.jboss.logging");
+        l1.setLevel(JulLevel.WARNING);
+        l2.setLevel(JulLevel.WARNING);
+        l3.setLevel(JulLevel.WARNING);
+        l4.setLevel(JulLevel.WARNING);
+        l5.setLevel(JulLevel.WARNING);
+        l6.setLevel(JulLevel.WARNING);
+        l1 :: l2 :: l3 :: l4 :: l5 :: l6 :: Nil
     }
+
+    def logServerError(enabled: Bool, msg: String): Unit \ IO =
+        if (enabled) JulLogger.getLogger("weft.server").severe(msg) else ()
+
+    def logServerWarn(enabled: Bool, msg: String): Unit \ IO =
+        if (enabled) JulLogger.getLogger("weft.server").warning(msg) else ()
 
     ///
     /// Starts the embedded Undertow HTTP/1.1 + HTTP/2 (or HTTPS when `ServerConfig.withTls`
@@ -64,7 +81,7 @@ pub mod Weft.Server {
     /// `HttpError`, `Auth`, `Logger`, `Clock`, domain stores, etc.) has been handled!
     ///
     pub def start(cfg: ServerConfig, app: App[IO]): Result[String, ServerHandle] \ IO = {
-        silenceRoutineServerLogs();
+        let silencedLoggers = silenceRoutineServerLogs();
         let ServerConfig.ServerConfig(c) = cfg;
         let resolvedIoThreads =
             if (c#ioThreads > 0) c#ioThreads
@@ -86,6 +103,7 @@ pub mod Weft.Server {
                     c#readTimeoutMs,
                     c#handlerTimeoutMs,
                     c#exposeInternalErrors,
+                    c#logServerErrors,
                     vExec,
                     app
                 );
@@ -97,10 +115,22 @@ pub mod Weft.Server {
                     let b3 = b2.setSslEngineDelegatedTaskExecutor(vExec);
                     let backlogObj: JObject = checked_cast(Integer.valueOf(Int32.max(1, c#backlog)));
                     let maxEntityObj: JObject = checked_cast(JLong.valueOf(-1i64));
+                    let maxHeaderSizeObj: JObject = checked_cast(Integer.valueOf(Int32.max(1024, c#maxHeaderSize)));
+                    let maxHeadersObj: JObject = checked_cast(Integer.valueOf(Int32.max(1, c#maxHeaders)));
                     let http2Obj: JObject = checked_cast(JBoolean.valueOf(true));
                     let b4 = b3.setSocketOption(Options.BACKLOG, backlogObj);
                     let b5 = b4.setServerOption(UndertowOptions.MAX_ENTITY_SIZE, maxEntityObj);
-                    let b6 = b5.setHandler(graceful);
+                    let b5h1 = b5.setServerOption(UndertowOptions.MAX_HEADER_SIZE, maxHeaderSizeObj);
+                    let b5h2 = b5h1.setServerOption(UndertowOptions.MAX_HEADERS, maxHeadersObj);
+                    let b5a = if (c#idleTimeoutMs > 0) {
+                        let idleObj: JObject = checked_cast(Integer.valueOf(c#idleTimeoutMs));
+                        b5h2.setServerOption(UndertowOptions.IDLE_TIMEOUT, idleObj)
+                    } else b5h2;
+                    let b5b = if (c#noRequestTimeoutMs > 0) {
+                        let noReqObj: JObject = checked_cast(Integer.valueOf(c#noRequestTimeoutMs));
+                        b5a.setServerOption(UndertowOptions.NO_REQUEST_TIMEOUT, noReqObj)
+                    } else b5a;
+                    let b6 = b5b.setHandler(graceful);
                     let b7 = if (c#enableHttp2)
                         b6.setServerOption(UndertowOptions.ENABLE_HTTP2, http2Obj)
                     else
@@ -112,6 +142,8 @@ pub mod Weft.Server {
                     };
                     let srv = b8.build();
                     srv.start();
+                    // Keep strong references to JUL loggers alive through Undertow/XNIO initialization
+                    let _ = List.length(silencedLoggers);
                     let boundPort = extractBoundPort(srv, c#port);
                     Ok(ServerHandle.ServerHandle({
                         server    = srv,
@@ -228,9 +260,10 @@ pub mod Weft.Server {
             try {
                 TimedOutcome.Completed(action())
             } catch {
-                case ex: Exception =>
+                case ex: Throwable =>
                     let rawMsg = ex.getMessage();
-                    TimedOutcome.Failed(if (Object.isNull(rawMsg)) "Unhandled exception" else rawMsg)
+                    let cls = ex.getClass().getName();
+                    TimedOutcome.Failed(if (Object.isNull(rawMsg)) cls else "${cls}: ${rawMsg}")
             }
         } else {
             let latch = new CountDownLatch(1);
@@ -240,9 +273,10 @@ pub mod Weft.Server {
                     let out = try {
                         TimedOutcome.Completed(action())
                     } catch {
-                        case ex: Exception =>
+                        case ex: Throwable =>
                             let rawMsg = ex.getMessage();
-                            TimedOutcome.Failed(if (Object.isNull(rawMsg)) "Unhandled exception" else rawMsg)
+                            let cls = ex.getClass().getName();
+                            TimedOutcome.Failed(if (Object.isNull(rawMsg)) cls else "${cls}: ${rawMsg}")
                     };
                     Ref.put(Some(out), resultRef);
                     latch.countDown()
@@ -278,6 +312,7 @@ pub mod Weft.Server {
         readTimeoutMs: Int64,
         handlerTimeoutMs: Int64,
         exposeInternalErrors: Bool,
+        logErrors: Bool,
         vExec: ExecutorService,
         app: App[IO]
     ): HttpHandler \ IO =
@@ -291,6 +326,7 @@ pub mod Weft.Server {
                                 readTimeoutMs,
                                 handlerTimeoutMs,
                                 exposeInternalErrors,
+                                logErrors,
                                 app,
                                 exchange
                             )
@@ -302,6 +338,7 @@ pub mod Weft.Server {
                         readTimeoutMs,
                         handlerTimeoutMs,
                         exposeInternalErrors,
+                        logErrors,
                         app,
                         exchange
                     )
@@ -313,6 +350,7 @@ pub mod Weft.Server {
         readTimeoutMs: Int64,
         handlerTimeoutMs: Int64,
         exposeInternalErrors: Bool,
+        logErrors: Bool,
         app: App[IO],
         exchange: HttpServerExchange
     ): Unit \ IO =
@@ -324,10 +362,12 @@ pub mod Weft.Server {
                         case TimedOutcome.Completed(res) =>
                             writeResponse(req, res, exchange)
                         case TimedOutcome.TimedOut =>
+                            logServerWarn(logErrors, "504 Gateway Timeout on ${Request.method(req)} ${Request.path(req)} after ${handlerTimeoutMs}ms");
                             let timeoutRes = Response.text("Gateway Timeout: handler exceeded ${handlerTimeoutMs}ms")
                                 |> Response.withStatus(Status.gatewayTimeout());
                             writeResponse(req, timeoutRes, exchange)
                         case TimedOutcome.Failed(errMsg) =>
+                            logServerError(logErrors, "500 Internal Server Error on ${Request.method(req)} ${Request.path(req)}: ${errMsg}");
                             let bodyMsg = if (exposeInternalErrors)
                                 "Internal Server Error: ${errMsg}"
                             else
@@ -342,11 +382,13 @@ pub mod Weft.Server {
                     let dummyReq = Request.make(Method.parse(exchange.getRequestMethod().toString()), "/");
                     writeResponse(dummyReq, tooLarge, exchange)
                 case Err(ReadError.ReadTimeout) =>
+                    logServerWarn(logErrors, "408 Request Timeout reading body on ${exchange.getRequestMethod().toString()} ${exchange.getRequestURI()} after ${readTimeoutMs}ms");
                     let timedOut = Response.text("Request Timeout: reading request body exceeded ${readTimeoutMs}ms")
                         |> Response.withStatus(Status.requestTimeout());
                     let dummyReq = Request.make(Method.parse(exchange.getRequestMethod().toString()), "/");
                     writeResponse(dummyReq, timedOut, exchange)
                 case Err(ReadError.ReadFailed(msg)) =>
+                    logServerWarn(logErrors, "400 Bad Request reading body on ${exchange.getRequestMethod().toString()} ${exchange.getRequestURI()}: ${msg}");
                     let bodyMsg = if (exposeInternalErrors) "Bad Request: ${msg}" else "Bad Request";
                     let bad = Response.text(bodyMsg)
                         |> Response.withStatus(Status.badRequest());
@@ -354,11 +396,13 @@ pub mod Weft.Server {
                     writeResponse(dummyReq, bad, exchange)
             }
         } catch {
-            case ex: Exception =>
+            case ex: Throwable =>
+                let rawMsg = ex.getMessage();
+                let cls = ex.getClass().getName();
+                let safeMsg = if (Object.isNull(rawMsg)) cls else "${cls}: ${rawMsg}";
+                logServerError(logErrors, "500 Unhandled server failure: ${safeMsg}");
                 try {
                     if (not exchange.isResponseStarted()) {
-                        let rawMsg = ex.getMessage();
-                        let safeMsg = if (Object.isNull(rawMsg)) "Unhandled exception" else rawMsg;
                         let bodyMsg = if (exposeInternalErrors)
                             "Internal Server Error: ${safeMsg}"
                         else
@@ -372,8 +416,8 @@ pub mod Weft.Server {
                         ()
                     }
                 } catch {
-                    case _: Exception =>
-                        try { let _ = exchange.endExchange(); () } catch { case _: Exception => () }
+                    case _: Throwable =>
+                        try { let _ = exchange.endExchange(); () } catch { case _: Throwable => () }
                 }
         }
 
@@ -390,6 +434,11 @@ pub mod Weft.Server {
             if (Object.isNull(rawQueryObj) or String.isEmpty(rawQueryObj)) rawPath
             else "${rawPath}?${rawQueryObj}";
         let flixHeaders = readHeaders(exchange.getRequestHeaders());
+        let peerAddrOpt = extractRemoteIp(exchange);
+        let attachPeer = req -> match peerAddrOpt {
+            case Some(ip) => Request.withRemoteAddr(ip, req)
+            case None     => req
+        };
         let contentLenOpt = match Headers.get("Content-Length", flixHeaders) {
             case Some(clStr) => Int64.fromString(String.trim(clStr))
             case None =>
@@ -419,12 +468,14 @@ pub mod Weft.Server {
                 Ok(
                     Request.make(method, fullRawPath)
                         |> Request.withHeaders(flixHeaders)
+                        |> attachPeer
                 )
             } else {
                 match runWithTimeout(readTimeoutMs, () -> readBoundedBytes(exchange.getInputStream(), maxBodyBytes)) {
                     case TimedOutcome.Completed(Ok(bodyVec)) =>
                         let baseReq = Request.make(method, fullRawPath)
-                            |> Request.withHeaders(flixHeaders);
+                            |> Request.withHeaders(flixHeaders)
+                            |> attachPeer;
                         if (Vector.isEmpty(bodyVec))
                             Ok(baseReq)
                         else
@@ -433,6 +484,22 @@ pub mod Weft.Server {
                     case TimedOutcome.TimedOut           => Err(ReadError.ReadTimeout)
                     case TimedOutcome.Failed(msg)        => Err(ReadError.ReadFailed(msg))
                 }
+            }
+        }
+    }
+
+    def extractRemoteIp(exchange: HttpServerExchange): Option[String] \ IO = {
+        let src = exchange.getSourceAddress();
+        if (Object.isNull(src))
+            None
+        else {
+            let inetAddr = src.getAddress();
+            if (not Object.isNull(inetAddr)) {
+                let hostAddr = inetAddr.getHostAddress();
+                if (Object.isNull(hostAddr) or String.isEmpty(hostAddr)) None else Some(hostAddr)
+            } else {
+                let hostStr = src.getHostString();
+                if (Object.isNull(hostStr) or String.isEmpty(hostStr)) None else Some(hostStr)
             }
         }
     }

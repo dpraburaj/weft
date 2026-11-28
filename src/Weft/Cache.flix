@@ -246,11 +246,20 @@ pub mod Weft.Cache {
     // --- 2. Thread-Safe Concurrent In-Memory Backend ---
 
     ///
-    /// Creates a new thread-safe concurrent `InMemoryCache` for virtual-thread servers.
+    /// Creates a new thread-safe bounded `InMemoryCache` (default capacity: 100,000 entries)
+    /// for virtual-thread servers.
     ///
     pub def makeInMemory(): InMemoryCache \ IO =
+        makeInMemoryWithCapacity(100000)
+
+    ///
+    /// Creates a thread-safe `InMemoryCache` bounded to at most `maxEntries` cached keys,
+    /// pruning expired keys and evicting an entry when capacity is reached.
+    ///
+    pub def makeInMemoryWithCapacity(maxEntries: Int32): InMemoryCache \ IO =
         InMemoryCache.InMemoryCache(
             new ReentrantLock(),
+            Int32.max(1, maxEntries),
             Ref.fresh(Static, Map.empty()),
             Ref.fresh(Static, Map.empty())
         )
@@ -268,11 +277,31 @@ pub mod Weft.Cache {
         }
     }
 
+    def evictOneCacheEntry(m: Map[String, (String, Option[Int64])]): Map[String, (String, Option[Int64])] = {
+        // Prefer evicting the earliest-expiring TTL entry; otherwise evict the first key.
+        let bestTtl = Map.foldLeftWithKey((acc, k, entry) -> {
+            let (_, expOpt) = entry;
+            match (expOpt, acc) {
+                case (Some(exp), None) => Some((k, exp))
+                case (Some(exp), Some((_, curExp))) if exp < curExp => Some((k, exp))
+                case _ => acc
+            }
+        }, None, m);
+        match bestTtl {
+            case Some((k, _)) => Map.remove(k, m)
+            case None =>
+                match Map.minimumKey(m) {
+                    case Some((k, _)) => Map.remove(k, m)
+                    case None         => m
+                }
+        }
+    }
+
     ///
     /// Handles `Cache` against a shared thread-safe `InMemoryCache`.
     ///
     pub def runInMemory(store: InMemoryCache, f: Unit -> a \ ef): a \ (ef - Cache) + IO = {
-        let InMemoryCache.InMemoryCache(lock, entriesRef, locksRef) = store;
+        let InMemoryCache.InMemoryCache(lock, maxEntries, entriesRef, locksRef) = store;
         run {
             f()
         } with handler Cache {
@@ -292,9 +321,14 @@ pub mod Weft.Cache {
                 k(found)
             }
             def putRaw(key, value, expOpt, k) = {
-                withMutex(lock, () ->
-                    Ref.transform(m -> Map.insert(key, (value, expOpt), m), entriesRef)
-                );
+                withMutex(lock, () -> {
+                    let cur = Ref.get(entriesRef);
+                    let prepared = if (Map.memberOf(key, cur) or Map.size(cur) < maxEntries)
+                        cur
+                    else
+                        evictOneCacheEntry(cur);
+                    Ref.put(Map.insert(key, (value, expOpt), prepared), entriesRef)
+                });
                 k()
             }
             def forget(key, k) = {
@@ -434,25 +468,20 @@ pub mod Weft.Cache {
                 k(c1 + c2)
             }
             def acquireLock(name, owner, expMs, nowMs, k) = {
-                let acquired = Db.transaction(() -> {
-                    let existing = Db.queryOneMap(
-                        "SELECT owner, expires_at_ms FROM _weft_cache_locks WHERE name = ?",
-                        SqlValue.text(name) :: Nil,
-                        row -> (Row.requireString("owner", row), Row.requireInt64("expires_at_ms", row))
-                    );
-                    match existing {
-                        case Some((curOwner, curExp)) if nowMs < curExp and curOwner != owner =>
-                            false
-                        case _ =>
-                            let _ = Db.execute(
-                                "INSERT INTO _weft_cache_locks (name, owner, expires_at_ms) VALUES (?, ?, ?) " +
-                                "ON CONFLICT(name) DO UPDATE SET owner = excluded.owner, expires_at_ms = excluded.expires_at_ms",
-                                SqlValue.text(name) :: SqlValue.text(owner) :: SqlValue.int64(expMs) :: Nil
-                            );
-                            true
-                    }
-                });
-                k(acquired)
+                // Single atomic conditional upsert supported by both SQLite (3.24+) and PostgreSQL (9.5+):
+                // inserts if absent, or steals/renews only if expired or already owned by `owner`.
+                let affected = Db.execute(
+                    "INSERT INTO _weft_cache_locks (name, owner, expires_at_ms) VALUES (?, ?, ?) " +
+                    "ON CONFLICT(name) DO UPDATE SET owner = excluded.owner, expires_at_ms = excluded.expires_at_ms " +
+                    "WHERE _weft_cache_locks.expires_at_ms <= ? OR _weft_cache_locks.owner = ?",
+                    SqlValue.text(name) ::
+                    SqlValue.text(owner) ::
+                    SqlValue.int64(expMs) ::
+                    SqlValue.int64(nowMs) ::
+                    SqlValue.text(owner) ::
+                    Nil
+                );
+                k(affected > 0)
             }
             def releaseLock(name, owner, k) = {
                 let affected = Db.execute(

@@ -11,15 +11,16 @@ pub mod Weft.Request {
     ///
     pub enum Request {
         case Request({
-            method   = Method,
-            path     = String,
-            rawQuery = String,
-            queryMap = Map[String, String],
-            queryAll = Map[String, List[String]],
-            params   = Map[String, String],
-            headers  = Headers,
-            cookies  = Map[String, String],
-            body     = Body
+            method     = Method,
+            path       = String,
+            rawQuery   = String,
+            queryMap   = Map[String, String],
+            queryAll   = Map[String, List[String]],
+            params     = Map[String, String],
+            headers    = Headers,
+            cookies    = Map[String, String],
+            body       = Body,
+            remoteAddr = Option[String]
         })
     }
 
@@ -35,7 +36,8 @@ pub mod Weft.Request {
             x#params == y#params and
             x#headers == y#headers and
             x#cookies == y#cookies and
-            x#body == y#body
+            x#body == y#body and
+            x#remoteAddr == y#remoteAddr
     }
 
     ///
@@ -51,15 +53,16 @@ pub mod Weft.Request {
         let parsedAll = Url.parseQueryAll(rawQ);
         let parsedSingle = Map.map(vs -> Option.getWithDefault("", List.last(vs)), parsedAll);
         Request.Request({
-            method   = m,
-            path     = if (String.isEmpty(pathPart)) "/" else pathPart,
-            rawQuery = rawQ,
-            queryMap = parsedSingle,
-            queryAll = parsedAll,
-            params   = Map.empty(),
-            headers  = Headers.empty(),
-            cookies  = Map.empty(),
-            body     = Body.empty()
+            method     = m,
+            path       = if (String.isEmpty(pathPart)) "/" else pathPart,
+            rawQuery   = rawQ,
+            queryMap   = parsedSingle,
+            queryAll   = parsedAll,
+            params     = Map.empty(),
+            headers    = Headers.empty(),
+            cookies    = Map.empty(),
+            body       = Body.empty(),
+            remoteAddr = None
         })
 
     pub def get(p: String): Request    = make(Method.Get, p)
@@ -82,6 +85,48 @@ pub mod Weft.Request {
     pub def body(req: Request): String                            = Body.asText(bodyValue(req))
     pub def bodyBytes(req: Request): Vector[Int8]                 = Body.asBytes(bodyValue(req))
     pub def bodyLength(req: Request): Int32                       = Body.byteLength(bodyValue(req))
+    pub def remoteAddr(req: Request): Option[String]              = let Request.Request(r) = req; r#remoteAddr
+
+    ///
+    /// Resolves the client IP address safely:
+    /// - Returns `remoteAddr` directly unless `remoteAddr` matches an entry in `trustedProxies`
+    ///   (or `trustedProxies` contains `"*"`).
+    /// - Only when the direct peer is a trusted proxy does it inspect `X-Forwarded-For`
+    ///   (first non-empty IP) or `X-Real-IP`.
+    ///
+    pub def clientIp(trustedProxies: List[String], req: Request): Option[String] = {
+        let peerOpt = remoteAddr(req);
+        let isTrusted = match peerOpt {
+            case Some(peer) => List.exists(p -> p == "*" or p == peer, trustedProxies)
+            case None       => List.exists(p -> p == "*", trustedProxies)
+        };
+        if (isTrusted) {
+            match forwardedIp(req) {
+                case Some(ip) => Some(ip)
+                case None     => peerOpt
+            }
+        } else {
+            peerOpt
+        }
+    }
+
+    def forwardedIp(req: Request): Option[String] =
+        match header("X-Forwarded-For", req) {
+            case Some(raw) =>
+                match List.head(String.splitOn({substr = ","}, raw)) {
+                    case Some(first) =>
+                        let trimmed = String.trim(first);
+                        if (String.isEmpty(trimmed)) None else Some(trimmed)
+                    case None => None
+                }
+            case None =>
+                match header("X-Real-IP", req) {
+                    case Some(ip) =>
+                        let trimmed = String.trim(ip);
+                        if (String.isEmpty(trimmed)) None else Some(trimmed)
+                    case None => None
+                }
+        }
 
     pub def header(name: String, req: Request): Option[String] =
         Headers.get(name, headers(req))
@@ -155,11 +200,17 @@ pub mod Weft.Request {
 
     pub def withHeaders(h: Headers, req: Request): Request =
         let Request.Request(r) = req;
-        let parsedCookies = match Headers.get("Cookie", h) {
-            case Some(cv) => Map.unionWith((_, v2) -> v2, r#cookies, Cookie.parseHeader(cv))
-            case None     => r#cookies
-        };
+        let cookieHeaders = Headers.getAll("Cookie", h);
+        let parsedCookies = if (List.isEmpty(cookieHeaders))
+            r#cookies
+        else
+            Map.unionWith((_, v2) -> v2, r#cookies, Cookie.parseHeaders(cookieHeaders));
         Request.Request({ headers = h, cookies = parsedCookies | r })
+
+    pub def withRemoteAddr(addr: String, req: Request): Request =
+        let Request.Request(r) = req;
+        let trimmed = String.trim(addr);
+        Request.Request({ remoteAddr = if (String.isEmpty(trimmed)) None else Some(trimmed) | r })
 
     pub def withBody(b: String, req: Request): Request =
         let Request.Request(r) = req;

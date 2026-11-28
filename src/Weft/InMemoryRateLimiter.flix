@@ -6,7 +6,7 @@ pub mod Weft.InMemoryRateLimiter {
     /// Stores `(hitCount, windowResetAtMs)` per scoped key.
     ///
     pub enum InMemoryRateLimiter {
-        case InMemoryRateLimiter(ReentrantLock, Ref[Map[String, (Int32, Int64)], Static])
+        case InMemoryRateLimiter(ReentrantLock, Int32, Ref[Map[String, (Int32, Int64)], Static])
     }
 
 }

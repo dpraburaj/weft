@@ -346,15 +346,28 @@ pub mod Weft.Json {
     // --- Recursive-Descent Parser (RFC 8259) ---
 
     ///
-    /// Parses a JSON string into a `Json` AST.
+    /// Default maximum JSON nesting depth enforced by `Json.parse` to prevent
+    /// stack-overflow DoS from deeply nested payloads (e.g. `[[[[...]]]]`).
+    ///
+    pub def defaultMaxDepth(): Int32 = 128
+
+    ///
+    /// Parses a JSON string into a `Json` AST with the default max nesting depth (`128`).
     ///
     pub def parse(input: String): Result[String, Json] =
+        parseWithMaxDepth(defaultMaxDepth(), input)
+
+    ///
+    /// Parses a JSON string into a `Json` AST, rejecting nesting deeper than `maxDepth`.
+    ///
+    pub def parseWithMaxDepth(maxDepth: Int32, input: String): Result[String, Json] =
+        let safeMax = Int32.max(1, maxDepth);
         let len = String.length(input);
         let start = skipWs(input, len, 0);
         if (start >= len)
             Err("Unexpected end of input")
         else
-            match parseValue(input, len, start) {
+            match parseValue(input, len, start, 0, safeMax) {
                 case Ok((v, nextIdx)) =>
                     let endIdx = skipWs(input, len, nextIdx);
                     if (endIdx == len)
@@ -374,7 +387,7 @@ pub mod Weft.Json {
             case _    => i
         }
 
-    def parseValue(s: String, len: Int32, i0: Int32): Result[String, (Json, Int32)] =
+    def parseValue(s: String, len: Int32, i0: Int32, depth: Int32, maxDepth: Int32): Result[String, (Json, Int32)] =
         let i = skipWs(s, len, i0);
         if (i >= len)
             Err("Unexpected end of input at position ${i}")
@@ -385,8 +398,16 @@ pub mod Weft.Json {
                 case 'f' => parseLiteral(s, len, i, "false", Json.JBool(false))
                 case '"' =>
                     Result.map(match (strVal, next) -> (Json.JString(strVal), next), parseString(s, len, i))
-                case '[' => parseArray(s, len, i)
-                case '{' => parseObject(s, len, i)
+                case '[' =>
+                    if (depth >= maxDepth)
+                        Err("Maximum JSON nesting depth (${maxDepth}) exceeded at position ${i}")
+                    else
+                        parseArray(s, len, i, depth + 1, maxDepth)
+                case '{' =>
+                    if (depth >= maxDepth)
+                        Err("Maximum JSON nesting depth (${maxDepth}) exceeded at position ${i}")
+                    else
+                        parseObject(s, len, i, depth + 1, maxDepth)
                 case c if c == '-' or Char.isDigit(c) => parseNumber(s, len, i)
                 case c   => Err("Unexpected character '${c}' at position ${i}")
             }
@@ -488,13 +509,13 @@ pub mod Weft.Json {
                 }
             }
 
-    def parseArray(s: String, len: Int32, i0: Int32): Result[String, (Json, Int32)] =
+    def parseArray(s: String, len: Int32, i0: Int32, depth: Int32, maxDepth: Int32): Result[String, (Json, Int32)] =
         let i1 = skipWs(s, len, i0 + 1);
         if (i1 < len and String.charAt(i1, s) == ']')
             Ok((Json.JArray(Nil), i1 + 1))
         else {
             def loop(i, acc) = {
-                match parseValue(s, len, i) {
+                match parseValue(s, len, i, depth, maxDepth) {
                     case Err(e) => Err(e)
                     case Ok((v, next)) =>
                         let after = skipWs(s, len, next);
@@ -510,7 +531,7 @@ pub mod Weft.Json {
             loop(i1, Nil)
         }
 
-    def parseObject(s: String, len: Int32, i0: Int32): Result[String, (Json, Int32)] =
+    def parseObject(s: String, len: Int32, i0: Int32, depth: Int32, maxDepth: Int32): Result[String, (Json, Int32)] =
         let i1 = skipWs(s, len, i0 + 1);
         if (i1 < len and String.charAt(i1, s) == '}')
             Ok((Json.JObject(Map.empty()), i1 + 1))
@@ -527,7 +548,7 @@ pub mod Weft.Json {
                             if (colonIdx >= len or String.charAt(colonIdx, s) != ':')
                                 Err("Expected ':' after key '${k}' at position ${colonIdx}")
                             else
-                                match parseValue(s, len, colonIdx + 1) {
+                                match parseValue(s, len, colonIdx + 1, depth, maxDepth) {
                                     case Err(e) => Err(e)
                                     case Ok((v, afterVal)) =>
                                         let next = skipWs(s, len, afterVal);

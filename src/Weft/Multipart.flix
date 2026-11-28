@@ -24,10 +24,24 @@ pub mod Weft.Multipart {
     }
 
     ///
+    /// Default maximum number of parts accepted by `Multipart.parse` to prevent
+    /// part-flooding CPU/memory DoS attacks.
+    ///
+    pub def defaultMaxParts(): Int32 = 1000
+
+    ///
     /// Pure binary RFC 7578 `multipart/form-data` parser operating directly on `Vector[Int8]`.
     /// Preserves exact raw bytes of uploaded files without UTF-8 lossy conversion.
+    /// Enforces `defaultMaxParts()` (`1000` parts).
     ///
-    pub def parse(boundary: String, rawBody: Vector[Int8]): Result[String, MultipartForm] = {
+    pub def parse(boundary: String, rawBody: Vector[Int8]): Result[String, MultipartForm] =
+        parseWithMaxParts(defaultMaxParts(), boundary, rawBody)
+
+    ///
+    /// Like `parse`, enforcing a custom maximum part count `maxParts`.
+    ///
+    pub def parseWithMaxParts(maxParts: Int32, boundary: String, rawBody: Vector[Int8]): Result[String, MultipartForm] = {
+        let safeMaxParts = Int32.max(1, maxParts);
         if (String.isEmpty(boundary))
             Err("Multipart boundary must not be empty")
         else {
@@ -43,6 +57,7 @@ pub mod Weft.Multipart {
                 case Some(firstIdx) =>
                     def loop(
                         pos: Int32,
+                        partCount: Int32,
                         fieldsAcc: Map[String, List[String]],
                         filesAcc: Map[String, List[UploadedFile]]
                     ): Result[String, MultipartForm] = {
@@ -53,6 +68,8 @@ pub mod Weft.Multipart {
                             let finalFields = Map.map(List.reverse, fieldsAcc);
                             let finalFiles = Map.map(List.reverse, filesAcc);
                             Ok(MultipartForm.make(finalFields, finalFiles))
+                        } else if (partCount >= safeMaxParts) {
+                            Err("Multipart payload exceeds maximum allowed part count (${safeMaxParts})")
                         } else {
                             let afterBreak = skipLineBreak(rawBody, pos, totalLen);
                             match afterBreak {
@@ -83,12 +100,12 @@ pub mod Weft.Multipart {
                                                                     let uf = UploadedFile.make(fieldName, fname, ct, payloadBytes);
                                                                     let prev = Map.getWithDefault(fieldName, Nil, filesAcc);
                                                                     let nextFiles = Map.insert(fieldName, uf :: prev, filesAcc);
-                                                                    loop(nextDelimIdx + delimLen, fieldsAcc, nextFiles)
+                                                                    loop(nextDelimIdx + delimLen, partCount + 1, fieldsAcc, nextFiles)
                                                                 case None =>
                                                                     let txt = Body.utf8String(payloadBytes);
                                                                     let prev = Map.getWithDefault(fieldName, Nil, fieldsAcc);
                                                                     let nextFields = Map.insert(fieldName, txt :: prev, fieldsAcc);
-                                                                    loop(nextDelimIdx + delimLen, nextFields, filesAcc)
+                                                                    loop(nextDelimIdx + delimLen, partCount + 1, nextFields, filesAcc)
                                                             }
                                                     }
                                             }
@@ -96,7 +113,7 @@ pub mod Weft.Multipart {
                             }
                         }
                     };
-                    loop(firstIdx + delimLen, Map.empty(), Map.empty())
+                    loop(firstIdx + delimLen, 0, Map.empty(), Map.empty())
             }
         }
     }

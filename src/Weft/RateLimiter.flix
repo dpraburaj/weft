@@ -168,11 +168,20 @@ pub mod Weft.RateLimiter {
     // --- 2. Thread-Safe Concurrent In-Memory Backend ---
 
     ///
-    /// Creates a thread-safe in-memory rate limiter store for concurrent virtual-thread servers.
+    /// Creates a thread-safe bounded in-memory rate limiter store (default capacity: 100,000 buckets)
+    /// for concurrent virtual-thread servers.
     ///
     pub def makeInMemory(): InMemoryRateLimiter \ IO =
+        makeInMemoryWithCapacity(100000)
+
+    ///
+    /// Creates a thread-safe in-memory rate limiter store bounded to at most `maxEntries` buckets,
+    /// automatically pruning expired windows and evicting the earliest-resetting bucket when full.
+    ///
+    pub def makeInMemoryWithCapacity(maxEntries: Int32): InMemoryRateLimiter \ IO =
         InMemoryRateLimiter.InMemoryRateLimiter(
             new ReentrantLock(),
+            Int32.max(1, maxEntries),
             Ref.fresh(Static, Map.empty())
         )
 
@@ -189,19 +198,41 @@ pub mod Weft.RateLimiter {
         }
     }
 
+    def evictOldestBucket(m: Map[String, (Int32, Int64)]): Map[String, (Int32, Int64)] = {
+        let victimOpt = Map.foldLeftWithKey((acc, k, v) -> {
+            let (_, resetMs) = v;
+            match acc {
+                case None => Some((k, resetMs))
+                case Some((_, bestReset)) if resetMs < bestReset => Some((k, resetMs))
+                case _ => acc
+            }
+        }, None, m);
+        match victimOpt {
+            case Some((k, _)) => Map.remove(k, m)
+            case None         => m
+        }
+    }
+
     ///
     /// Handles `RateLimiter` against a shared thread-safe `InMemoryRateLimiter`.
     ///
     pub def runInMemory(store: InMemoryRateLimiter, f: Unit -> a \ ef): a \ (ef - RateLimiter) + IO = {
-        let InMemoryRateLimiter.InMemoryRateLimiter(lock, mapRef) = store;
+        let InMemoryRateLimiter.InMemoryRateLimiter(lock, maxEntries, mapRef) = store;
         run {
             f()
         } with handler RateLimiter {
             def hit(key, maxReqs, winMs, nowMs, k) = {
                 let decision = withLock(lock, () -> {
-                    let existing = Map.get(key, Ref.get(mapRef));
+                    let cur = Ref.get(mapRef);
+                    let existing = Map.get(key, cur);
                     let (d, nextState) = evalHit(existing, maxReqs, winMs, nowMs);
-                    Ref.transform(m -> Map.insert(key, nextState, m), mapRef);
+                    let prepared = if (Option.nonEmpty(existing) or Map.size(cur) < maxEntries) {
+                        cur
+                    } else {
+                        let pruned = Map.filter(match (_, resetMs) -> nowMs < resetMs, cur);
+                        if (Map.size(pruned) < maxEntries) pruned else evictOldestBucket(pruned)
+                    };
+                    Ref.put(Map.insert(key, nextState, prepared), mapRef);
                     d
                 });
                 k(decision)
@@ -264,19 +295,43 @@ pub mod Weft.RateLimiter {
             f()
         } with handler RateLimiter {
             def hit(key, maxReqs, winMs, nowMs, k) = {
+                let safeMax = Int32.max(1, maxReqs);
+                let safeWin = Int64.max(1i64, winMs);
+                let freshReset = nowMs + safeWin;
+                // Single atomic conditional upsert + RETURNING inside a transaction (writer-pinned on SQLite,
+                // row-locked atomic increment on PostgreSQL) eliminating read-modify-write race windows.
                 let decision = Db.transaction(() -> {
-                    let existing = Db.queryOneMap(
-                        "SELECT hits, reset_at_ms FROM _weft_rate_limits WHERE key = ?",
-                        SqlValue.text(key) :: Nil,
+                    let rowOpt = Db.queryOneMap(
+                        "INSERT INTO _weft_rate_limits (key, hits, reset_at_ms) VALUES (?, 1, ?) " +
+                        "ON CONFLICT(key) DO UPDATE SET " +
+                        "hits = CASE " +
+                        "  WHEN _weft_rate_limits.reset_at_ms <= ? THEN 1 " +
+                        "  WHEN _weft_rate_limits.hits <= ? THEN _weft_rate_limits.hits + 1 " +
+                        "  ELSE _weft_rate_limits.hits " +
+                        "END, " +
+                        "reset_at_ms = CASE " +
+                        "  WHEN _weft_rate_limits.reset_at_ms <= ? THEN ? " +
+                        "  ELSE _weft_rate_limits.reset_at_ms " +
+                        "END " +
+                        "RETURNING hits, reset_at_ms",
+                        SqlValue.text(key) ::
+                        SqlValue.int64(freshReset) ::
+                        SqlValue.int64(nowMs) ::
+                        SqlValue.int(safeMax) ::
+                        SqlValue.int64(nowMs) ::
+                        SqlValue.int64(freshReset) ::
+                        Nil,
                         row -> (Row.requireInt("hits", row), Row.requireInt64("reset_at_ms", row))
                     );
-                    let (d, (nextHits, nextReset)) = evalHit(existing, maxReqs, winMs, nowMs);
-                    let _ = Db.execute(
-                        "INSERT INTO _weft_rate_limits (key, hits, reset_at_ms) VALUES (?, ?, ?) " +
-                        "ON CONFLICT(key) DO UPDATE SET hits = excluded.hits, reset_at_ms = excluded.reset_at_ms",
-                        SqlValue.text(key) :: SqlValue.int(nextHits) :: SqlValue.int64(nextReset) :: Nil
-                    );
-                    d
+                    match rowOpt {
+                        case Some((hits, resetAt)) =>
+                            if (hits <= safeMax)
+                                RateLimitDecision.make(true, safeMax, safeMax - hits, resetAt, 0i64)
+                            else
+                                RateLimitDecision.make(false, safeMax, 0, resetAt, Int64.max(0i64, resetAt - nowMs))
+                        case None =>
+                            RateLimitDecision.make(true, safeMax, safeMax - 1, freshReset, 0i64)
+                    }
                 });
                 k(decision)
             }

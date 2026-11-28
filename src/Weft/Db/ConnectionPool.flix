@@ -6,7 +6,10 @@ pub mod Weft.Db.ConnectionPool {
 
     import java.lang.Exception
     import java.lang.InterruptedException
+    import java.lang.{Long => JLong}
+    import java.lang.System
     import java.sql.Connection
+    import java.util.concurrent.ConcurrentHashMap
     import java.util.concurrent.LinkedBlockingDeque
     import java.util.concurrent.Semaphore
     import java.util.concurrent.TimeUnit
@@ -25,11 +28,16 @@ pub mod Weft.Db.ConnectionPool {
             config       = PoolConfig,
             factory      = Unit -> Result[String, Connection] \ IO,
             permits      = Semaphore,
-            idle         = LinkedBlockingDeque[Connection],
+            idle         = LinkedBlockingDeque[PooledConn],
+            activeMeta   = ConcurrentHashMap[Connection, JLong],
             closed       = AtomicBoolean,
             activeCount  = AtomicInteger,
             totalCreated = AtomicLong
         })
+    }
+
+    enum PooledConn {
+        case PooledConn(Connection, Int64, Int64)
     }
 
     ///
@@ -47,6 +55,7 @@ pub mod Weft.Db.ConnectionPool {
             factory      = factory,
             permits      = new Semaphore(maxConns, true),
             idle         = new LinkedBlockingDeque(),
+            activeMeta   = new ConcurrentHashMap(),
             closed       = new AtomicBoolean(false),
             activeCount  = new AtomicInteger(0),
             totalCreated = new AtomicLong(0i64)
@@ -67,8 +76,9 @@ pub mod Weft.Db.ConnectionPool {
             match (p#factory)() {
                 case Err(msg) => Err(msg)
                 case Ok(conn) =>
+                    let now = System.currentTimeMillis();
                     let _ = p#totalCreated.incrementAndGet();
-                    let _ = p#idle.offerFirst(conn);
+                    let _ = p#idle.offerFirst(PooledConn.PooledConn(conn, now, now));
                     prewarm(remaining - 1, pool)
             }
         }
@@ -94,13 +104,17 @@ pub mod Weft.Db.ConnectionPool {
                 p#permits.release();
                 Err((DbErrorKind.ConnectionFailed, "Database connection pool is closed"))
             } else {
-                match pollValidIdle(PoolConfig.validationTimeoutSec(p#config), p#idle) {
-                    case Some(conn) =>
+                let now = System.currentTimeMillis();
+                match pollValidIdle(p#config, now, p#idle) {
+                    case Some((conn, createdAtMs)) =>
+                        let _ = p#activeMeta.put(conn, JLong.valueOf(createdAtMs));
                         let _ = p#activeCount.incrementAndGet();
                         Ok(conn)
                     case None =>
                         match (p#factory)() {
                             case Ok(conn) =>
+                                let createdAt = System.currentTimeMillis();
+                                let _ = p#activeMeta.put(conn, JLong.valueOf(createdAt));
                                 let _ = p#totalCreated.incrementAndGet();
                                 let _ = p#activeCount.incrementAndGet();
                                 Ok(conn)
@@ -114,13 +128,18 @@ pub mod Weft.Db.ConnectionPool {
     }
 
     ///
-    /// Returns a healthy `conn` back to `pool` (or closes it if broken/closed/non-autocommit)
+    /// Returns a healthy `conn` back to `pool` (or closes it if broken/closed/non-autocommit/past maxLifetime)
     /// and releases its semaphore permit.
     ///
     pub def release(pool: ConnectionPool, conn: Connection): Unit \ IO = {
         let ConnectionPool.ConnectionPool(p) = pool;
+        let now = System.currentTimeMillis();
+        let createdObj = p#activeMeta.remove(conn);
+        let createdAtMs = if (Object.isNull(createdObj)) now else createdObj.longValue();
         let _ = p#activeCount.decrementAndGet();
-        let reusable = if (p#closed.get())
+        let maxLife = PoolConfig.maxLifetimeMs(p#config);
+        let expired = maxLife > 0i64 and (now - createdAtMs) >= maxLife;
+        let reusable = if (p#closed.get() or expired)
             false
         else
             try {
@@ -129,7 +148,7 @@ pub mod Weft.Db.ConnectionPool {
                 case _: Exception => false
             };
         if (reusable) {
-            let offered = p#idle.offerFirst(conn);
+            let offered = p#idle.offerFirst(PooledConn.PooledConn(conn, createdAtMs, now));
             if (not offered) safeClose(conn) else ()
         } else {
             safeClose(conn)
@@ -143,6 +162,7 @@ pub mod Weft.Db.ConnectionPool {
     ///
     pub def evict(pool: ConnectionPool, conn: Connection): Unit \ IO = {
         let ConnectionPool.ConnectionPool(p) = pool;
+        let _ = p#activeMeta.remove(conn);
         let _ = p#activeCount.decrementAndGet();
         safeClose(conn);
         p#permits.release()
@@ -197,15 +217,34 @@ pub mod Weft.Db.ConnectionPool {
 
     // --- Internal Helpers ---
 
-    def pollValidIdle(validationSecs: Int32, deque: LinkedBlockingDeque[Connection]): Option[Connection] \ IO = {
-        let conn = deque.pollFirst();
-        if (Object.isNull(conn))
+    def pollValidIdle(
+        cfg: PoolConfig,
+        nowMs: Int64,
+        deque: LinkedBlockingDeque[PooledConn]
+    ): Option[(Connection, Int64)] \ IO = {
+        let entry = deque.pollFirst();
+        if (Object.isNull(entry))
             None
-        else if (isHealthy(validationSecs, conn))
-            Some(conn)
         else {
-            safeClose(conn);
-            pollValidIdle(validationSecs, deque)
+            let PooledConn.PooledConn(conn, createdAtMs, lastUsedAtMs) = entry;
+            let maxLife = PoolConfig.maxLifetimeMs(cfg);
+            let idleTimeout = PoolConfig.idleTimeoutMs(cfg);
+            let pastMaxLife = maxLife > 0i64 and (nowMs - createdAtMs) >= maxLife;
+            let pastIdle = idleTimeout > 0i64 and (nowMs - lastUsedAtMs) >= idleTimeout;
+            if (pastMaxLife or pastIdle) {
+                safeClose(conn);
+                pollValidIdle(cfg, nowMs, deque)
+            } else {
+                let valSecs = PoolConfig.validationTimeoutSec(cfg);
+                let valInterval = PoolConfig.validationIntervalMs(cfg);
+                let needsValidation = valSecs > 0 and (valInterval <= 0i64 or (nowMs - lastUsedAtMs) >= valInterval);
+                if (isHealthy(if (needsValidation) valSecs else 0, conn))
+                    Some((conn, createdAtMs))
+                else {
+                    safeClose(conn);
+                    pollValidIdle(cfg, nowMs, deque)
+                }
+            }
         }
     }
 
@@ -221,11 +260,12 @@ pub mod Weft.Db.ConnectionPool {
             case _: Exception => false
         }
 
-    def drainAndClose(deque: LinkedBlockingDeque[Connection]): Unit \ IO = {
-        let conn = deque.pollFirst();
-        if (Object.isNull(conn))
+    def drainAndClose(deque: LinkedBlockingDeque[PooledConn]): Unit \ IO = {
+        let entry = deque.pollFirst();
+        if (Object.isNull(entry))
             ()
         else {
+            let PooledConn.PooledConn(conn, _, _) = entry;
             safeClose(conn);
             drainAndClose(deque)
         }

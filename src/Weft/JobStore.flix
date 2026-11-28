@@ -221,6 +221,11 @@ pub mod Weft.JobStore {
             "ALTER TABLE _weft_jobs ADD COLUMN unique_key TEXT;" +
             "CREATE INDEX IF NOT EXISTS idx_weft_jobs_unique_key ON _weft_jobs (unique_key, status)"
         ) ::
+        Migration.make(
+            1007,
+            "add_weft_jobs_unique_active_index",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_weft_jobs_unique_active ON _weft_jobs (unique_key) WHERE unique_key IS NOT NULL AND status IN ('pending', 'running')"
+        ) ::
         Nil
 
     ///
@@ -258,6 +263,11 @@ pub mod Weft.JobStore {
             "ALTER TABLE _weft_jobs ADD COLUMN IF NOT EXISTS unique_key TEXT;" +
             "CREATE INDEX IF NOT EXISTS idx_weft_jobs_unique_key ON _weft_jobs (unique_key, status)"
         ) ::
+        Migration.make(
+            1007,
+            "add_weft_jobs_unique_active_index",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_weft_jobs_unique_active ON _weft_jobs (unique_key) WHERE unique_key IS NOT NULL AND status IN ('pending', 'running')"
+        ) ::
         Nil
 
     ///
@@ -279,58 +289,84 @@ pub mod Weft.JobStore {
         } with handler JobStore {
             def insertJob(spec, nowMs, k) = {
                 let inserted = Db.transaction(() -> {
-                    let existingOpt = match JobSpec.uniqueKey(spec) {
-                        case None => None
-                        case Some(uKey) =>
-                            Db.queryOneMap(
-                                "${selectCols()} WHERE unique_key = ? AND status IN ('pending', 'running') ORDER BY id ASC LIMIT 1",
-                                SqlValue.text(uKey) :: Nil,
-                                decodeJobRow
-                            )
-                    };
+                    let findActive = uKey ->
+                        Db.queryOneMap(
+                            "${selectCols()} WHERE unique_key = ? AND status IN ('pending', 'running') ORDER BY id ASC LIMIT 1",
+                            SqlValue.text(uKey) :: Nil,
+                            decodeJobRow
+                        );
+                    let existingOpt = Option.flatMap(findActive, JobSpec.uniqueKey(spec));
                     match existingOpt {
                         case Some(existing) => existing
                         case None =>
                             let runAt = nowMs + JobSpec.delayMs(spec);
                             let payloadStr = Json.encode(JobSpec.payload(spec));
-                            let id = Db.insertAndGetId(
-                                "INSERT INTO _weft_jobs (queue, kind, payload, status, attempts, max_attempts, run_at_ms, last_error, unique_key, created_at_ms, updated_at_ms) " +
-                                "VALUES (?, ?, ?, 'pending', 0, ?, ?, NULL, ?, ?, ?)",
-                                SqlValue.text(JobSpec.queue(spec)) ::
-                                SqlValue.text(JobSpec.kind(spec)) ::
-                                SqlValue.text(payloadStr) ::
-                                SqlValue.int(JobSpec.maxAttempts(spec)) ::
-                                SqlValue.int64(runAt) ::
-                                SqlValue.optionalText(JobSpec.uniqueKey(spec)) ::
-                                SqlValue.int64(nowMs) ::
-                                SqlValue.int64(nowMs) ::
-                                Nil
+                            let insertAttempt = DbError.runToResult(() ->
+                                Db.transaction(() ->
+                                    Db.insertAndGetId(
+                                        "INSERT INTO _weft_jobs (queue, kind, payload, status, attempts, max_attempts, run_at_ms, last_error, unique_key, created_at_ms, updated_at_ms) " +
+                                        "VALUES (?, ?, ?, 'pending', 0, ?, ?, NULL, ?, ?, ?)",
+                                        SqlValue.text(JobSpec.queue(spec)) ::
+                                        SqlValue.text(JobSpec.kind(spec)) ::
+                                        SqlValue.text(payloadStr) ::
+                                        SqlValue.int(JobSpec.maxAttempts(spec)) ::
+                                        SqlValue.int64(runAt) ::
+                                        SqlValue.optionalText(JobSpec.uniqueKey(spec)) ::
+                                        SqlValue.int64(nowMs) ::
+                                        SqlValue.int64(nowMs) ::
+                                        Nil
+                                    )
+                                )
                             );
-                            buildNewJob(id, spec, nowMs)
+                            match insertAttempt {
+                                case Ok(id) =>
+                                    buildNewJob(id, spec, nowMs)
+                                case Err((DbErrorKind.ConstraintViolation, msg)) =>
+                                    match Option.flatMap(findActive, JobSpec.uniqueKey(spec)) {
+                                        case Some(winner) => winner
+                                        case None         => DbError.raise(DbErrorKind.ConstraintViolation, msg)
+                                    }
+                                case Err((kind, msg)) =>
+                                    DbError.raise(kind, msg)
+                            }
                     }
                 });
                 k(inserted)
             }
 
             def claimNext(queue, nowMs, k) = {
-                let claimed = Db.transaction(() -> {
-                    match Db.queryOneMap(
-                        "${selectCols()} WHERE queue = ? AND status = 'pending' AND run_at_ms <= ? " +
-                        "ORDER BY run_at_ms ASC, id ASC LIMIT 1",
-                        SqlValue.text(queue) :: SqlValue.int64(nowMs) :: Nil,
-                        decodeJobRow
-                    ) {
-                        case None => None
-                        case Some(j) =>
-                            let nextJob = transitionRunning(j, nowMs);
-                            let _ = Db.execute(
-                                "UPDATE _weft_jobs SET status = 'running', attempts = ?, updated_at_ms = ? WHERE id = ?",
-                                SqlValue.int(Job.attempts(nextJob)) :: SqlValue.int64(nowMs) :: SqlValue.int64(Job.id(nextJob)) :: Nil
-                            );
-                            Some(nextJob)
-                    }
-                });
-                k(claimed)
+                // Atomic compare-and-swap claim loop safe across both SQLite and concurrent PostgreSQL workers:
+                // under PostgreSQL READ COMMITTED, `WHERE id = ? AND status = 'pending'` is re-evaluated
+                // after row-locking, guaranteeing at most one worker observes `affected == 1`.
+                def tryClaim(attemptsLeft: Int32): Option[Job] \ {Db, DbError} =
+                    if (attemptsLeft <= 0)
+                        None
+                    else {
+                        let stepRes = Db.transaction(() ->
+                            match Db.queryOneMap(
+                                "${selectCols()} WHERE queue = ? AND status = 'pending' AND run_at_ms <= ? " +
+                                "ORDER BY run_at_ms ASC, id ASC LIMIT 1",
+                                SqlValue.text(queue) :: SqlValue.int64(nowMs) :: Nil,
+                                decodeJobRow
+                            ) {
+                                case None => None
+                                case Some(j) =>
+                                    let nextJob = transitionRunning(j, nowMs);
+                                    let affected = Db.execute(
+                                        "UPDATE _weft_jobs SET status = 'running', attempts = attempts + 1, updated_at_ms = ? " +
+                                        "WHERE id = ? AND status = 'pending'",
+                                        SqlValue.int64(nowMs) :: SqlValue.int64(Job.id(nextJob)) :: Nil
+                                    );
+                                    if (affected == 1) Some(Ok(nextJob)) else Some(Err(()))
+                            }
+                        );
+                        match stepRes {
+                            case None          => None
+                            case Some(Ok(job)) => Some(job)
+                            case Some(Err(())) => tryClaim(attemptsLeft - 1)
+                        }
+                    };
+                k(tryClaim(16))
             }
 
             def markCompleted(id, nowMs, k) = {

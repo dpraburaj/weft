@@ -221,6 +221,7 @@ mod TestServerHardeningAndProtocol {
         let ioApp: App[IO] = req -> app(req);
         let cfg = ServerConfig.local(0)
             |> ServerConfig.withHandlerTimeoutMs(100i64)
+            |> ServerConfig.withLogServerErrors(false)
             |> ServerConfig.withShutdownGraceSeconds(1);
 
         match Server.start(cfg, ioApp) {

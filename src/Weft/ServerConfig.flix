@@ -11,6 +11,10 @@ pub mod Weft.ServerConfig {
     /// - `maxBodyBytes` caps incoming request body size (default 10 MiB; `<= 0` disables).
     /// - `readTimeoutMs` caps incoming request body reads (default 15s -> `408 Request Timeout`; `<= 0` disables).
     /// - `handlerTimeoutMs` caps handler execution time (default 30s -> `504 Gateway Timeout`; `<= 0` disables).
+    /// - `idleTimeoutMs` caps keep-alive/idle socket lifetime (default 60s; `<= 0` disables).
+    /// - `noRequestTimeoutMs` caps header-read wait on new sockets to mitigate Slowloris (default 15s; `<= 0` disables).
+    /// - `maxHeaderSize` caps total HTTP header block size in bytes (default 16 KiB).
+    /// - `maxHeaders` caps total number of headers per request (default 100).
     /// - `shutdownGraceSeconds` sets how long `Server.serve` / `serveWithShutdown` waits for active requests to drain (default 5s).
     /// - `tls` optionally enables HTTPS via `Weft.TlsConfig`.
     ///
@@ -25,6 +29,11 @@ pub mod Weft.ServerConfig {
             exposeInternalErrors = Bool,
             readTimeoutMs        = Int64,
             handlerTimeoutMs     = Int64,
+            idleTimeoutMs        = Int32,
+            noRequestTimeoutMs   = Int32,
+            maxHeaderSize        = Int32,
+            maxHeaders           = Int32,
+            logServerErrors      = Bool,
             shutdownGraceSeconds = Int32,
             tls                  = Option[TlsConfig]
         })
@@ -33,6 +42,10 @@ pub mod Weft.ServerConfig {
     def defaultMaxBodyBytes(): Int32 = 10 * 1024 * 1024
     def defaultReadTimeoutMs(): Int64 = 15000i64
     def defaultHandlerTimeoutMs(): Int64 = 30000i64
+    def defaultIdleTimeoutMs(): Int32 = 60000
+    def defaultNoRequestTimeoutMs(): Int32 = 15000
+    def defaultMaxHeaderSize(): Int32 = 16384
+    def defaultMaxHeaders(): Int32 = 100
     def defaultShutdownGraceSeconds(): Int32 = 5
 
     pub def default(): ServerConfig =
@@ -46,6 +59,11 @@ pub mod Weft.ServerConfig {
             exposeInternalErrors = false,
             readTimeoutMs        = defaultReadTimeoutMs(),
             handlerTimeoutMs     = defaultHandlerTimeoutMs(),
+            idleTimeoutMs        = defaultIdleTimeoutMs(),
+            noRequestTimeoutMs   = defaultNoRequestTimeoutMs(),
+            maxHeaderSize        = defaultMaxHeaderSize(),
+            maxHeaders           = defaultMaxHeaders(),
+            logServerErrors      = true,
             shutdownGraceSeconds = defaultShutdownGraceSeconds(),
             tls                  = None
         })
@@ -65,6 +83,11 @@ pub mod Weft.ServerConfig {
     pub def exposeInternalErrors(cfg: ServerConfig): Bool  = let ServerConfig.ServerConfig(r) = cfg; r#exposeInternalErrors
     pub def readTimeoutMs(cfg: ServerConfig): Int64        = let ServerConfig.ServerConfig(r) = cfg; r#readTimeoutMs
     pub def handlerTimeoutMs(cfg: ServerConfig): Int64     = let ServerConfig.ServerConfig(r) = cfg; r#handlerTimeoutMs
+    pub def idleTimeoutMs(cfg: ServerConfig): Int32        = let ServerConfig.ServerConfig(r) = cfg; r#idleTimeoutMs
+    pub def noRequestTimeoutMs(cfg: ServerConfig): Int32   = let ServerConfig.ServerConfig(r) = cfg; r#noRequestTimeoutMs
+    pub def maxHeaderSize(cfg: ServerConfig): Int32        = let ServerConfig.ServerConfig(r) = cfg; r#maxHeaderSize
+    pub def maxHeaders(cfg: ServerConfig): Int32           = let ServerConfig.ServerConfig(r) = cfg; r#maxHeaders
+    pub def logServerErrors(cfg: ServerConfig): Bool       = let ServerConfig.ServerConfig(r) = cfg; r#logServerErrors
     pub def shutdownGraceSeconds(cfg: ServerConfig): Int32 = let ServerConfig.ServerConfig(r) = cfg; r#shutdownGraceSeconds
     pub def tls(cfg: ServerConfig): Option[TlsConfig]      = let ServerConfig.ServerConfig(r) = cfg; r#tls
     pub def isTls(cfg: ServerConfig): Bool                 = Option.nonEmpty(tls(cfg))
@@ -130,6 +153,42 @@ pub mod Weft.ServerConfig {
     pub def withHandlerTimeoutMs(ms: Int64, cfg: ServerConfig): ServerConfig =
         let ServerConfig.ServerConfig(r) = cfg;
         ServerConfig.ServerConfig({ handlerTimeoutMs = ms | r })
+
+    ///
+    /// Sets Undertow's idle connection timeout in milliseconds (`<= 0` disables).
+    ///
+    pub def withIdleTimeoutMs(ms: Int32, cfg: ServerConfig): ServerConfig =
+        let ServerConfig.ServerConfig(r) = cfg;
+        ServerConfig.ServerConfig({ idleTimeoutMs = ms | r })
+
+    ///
+    /// Sets Undertow's initial request-header timeout in milliseconds to mitigate Slowloris (`<= 0` disables).
+    ///
+    pub def withNoRequestTimeoutMs(ms: Int32, cfg: ServerConfig): ServerConfig =
+        let ServerConfig.ServerConfig(r) = cfg;
+        ServerConfig.ServerConfig({ noRequestTimeoutMs = ms | r })
+
+    ///
+    /// Sets the maximum total HTTP header block size in bytes (default 16 KiB).
+    ///
+    pub def withMaxHeaderSize(bytes: Int32, cfg: ServerConfig): ServerConfig =
+        let ServerConfig.ServerConfig(r) = cfg;
+        ServerConfig.ServerConfig({ maxHeaderSize = Int32.max(1024, bytes) | r })
+
+    ///
+    /// Sets the maximum number of HTTP headers accepted per request (default 100).
+    ///
+    pub def withMaxHeaders(count: Int32, cfg: ServerConfig): ServerConfig =
+        let ServerConfig.ServerConfig(r) = cfg;
+        ServerConfig.ServerConfig({ maxHeaders = Int32.max(1, count) | r })
+
+    ///
+    /// Controls whether server-level `408`/`500`/`504` failures are logged to JUL (`weft.server`).
+    /// Enabled (`true`) by default; disable only in tests that intentionally trigger server errors.
+    ///
+    pub def withLogServerErrors(flag: Bool, cfg: ServerConfig): ServerConfig =
+        let ServerConfig.ServerConfig(r) = cfg;
+        ServerConfig.ServerConfig({ logServerErrors = flag | r })
 
     ///
     /// Sets the graceful shutdown drain window in seconds (used by `Server.serve` and

@@ -1,6 +1,7 @@
 pub mod Weft.Migration {
     use Weft.Db
     use Weft.DbError
+    use Weft.DbErrorKind
     use Weft.Migration
     use Weft.Row
     use Weft.SqlValue
@@ -45,21 +46,60 @@ pub mod Weft.Migration {
         let sorted = List.sortBy(version, migrations);
         let pending = List.filter(m -> not Set.memberOf(version(m), appliedSet), sorted);
 
-        List.map(m -> {
-            Db.transaction(() -> {
-                let stmts = splitStatements(sql(m));
-                List.forEach(stmt -> {
-                    let _ = Db.executeSql(stmt);
-                    ()
-                }, stmts);
-                let _ = Db.execute(
-                    "INSERT INTO _weft_migrations (version, name) VALUES (?, ?)",
-                    SqlValue.int(version(m)) :: SqlValue.text(name(m)) :: Nil
-                );
-                version(m)
-            })
+        List.filterMap(m -> {
+            let v = version(m);
+            let attempt = DbError.runToResult(() ->
+                Db.transaction(() -> {
+                    let alreadyApplied = Option.nonEmpty(
+                        Db.queryOne(
+                            "SELECT version FROM _weft_migrations WHERE version = ?",
+                            SqlValue.int(v) :: Nil
+                        )
+                    );
+                    if (alreadyApplied) {
+                        None
+                    } else {
+                        let stmts = splitStatements(sql(m));
+                        List.forEach(stmt -> {
+                            let _ = Db.executeSql(stmt);
+                            ()
+                        }, stmts);
+                        let _ = Db.execute(
+                            "INSERT INTO _weft_migrations (version, name) VALUES (?, ?)",
+                            SqlValue.int(v) :: SqlValue.text(name(m)) :: Nil
+                        );
+                        Some(v)
+                    }
+                })
+            );
+            match attempt {
+                case Ok(appliedOpt) => appliedOpt
+                case Err((DbErrorKind.ConstraintViolation, msg)) =>
+                    // Another replica may have raced and committed this migration concurrently;
+                    // verify it is now recorded before treating as idempotent.
+                    let nowRecorded = Option.nonEmpty(
+                        Db.queryOne(
+                            "SELECT version FROM _weft_migrations WHERE version = ?",
+                            SqlValue.int(v) :: Nil
+                        )
+                    );
+                    if (nowRecorded) None else DbError.raise(DbErrorKind.ConstraintViolation, msg)
+                case Err((kind, msg)) =>
+                    DbError.raise(kind, msg)
+            }
         }, pending)
     }
+
+    ///
+    /// PostgreSQL multi-replica-safe migration runner that acquires a transaction-scoped
+    /// `pg_advisory_xact_lock` before running `runAll` so simultaneous container startups
+    /// serialize DDL cleanly instead of racing.
+    ///
+    pub def runAllPostgres(migrations: List[Migration]): List[Int32] \ {Db, DbError} =
+        Db.transaction(() -> {
+            let _ = Db.querySql("SELECT pg_advisory_xact_lock(728391042)");
+            runAll(migrations)
+        })
 
     ///
     /// Splits a multi-statement SQL migration safely without splitting inside:

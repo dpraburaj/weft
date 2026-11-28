@@ -94,16 +94,19 @@ pub mod Weft.Cookie {
 
     ///
     /// Serializes a `Cookie` into an HTTP `Set-Cookie` header value.
+    /// Strips CR/LF/NUL/semicolon characters from cookie fields to prevent header injection.
     ///
     pub def toHeaderValue(c: Cookie): String =
         let Cookie.Cookie(r) = c;
-        let parts0 = "${r#name}=${r#value}" :: Nil;
+        let safeName = sanitizeCookiePart(r#name);
+        let safeVal = sanitizeCookiePart(r#value);
+        let parts0 = "${safeName}=${safeVal}" :: Nil;
         let parts1 = match r#path {
-            case Some(p) => List.append(parts0, "Path=${p}" :: Nil)
+            case Some(p) => List.append(parts0, "Path=${sanitizeCookiePart(p)}" :: Nil)
             case None    => parts0
         };
         let parts2 = match r#domain {
-            case Some(d) => List.append(parts1, "Domain=${d}" :: Nil)
+            case Some(d) => List.append(parts1, "Domain=${sanitizeCookiePart(d)}" :: Nil)
             case None    => parts1
         };
         let parts3 = match r#maxAge {
@@ -117,6 +120,13 @@ pub mod Weft.Cookie {
             case None     => parts5
         };
         String.intercalate("; ", parts6)
+
+    def sanitizeCookiePart(s: String): String =
+        s
+            |> String.replace({src = "\r"}, {dst = ""})
+            |> String.replace({src = "\n"}, {dst = ""})
+            |> String.replace({src = "\u0000"}, {dst = ""})
+            |> String.replace({src = ";"}, {dst = ""})
 
     ///
     /// Parses an incoming `Cookie` header (`"a=1; b=2"`) into a `Map[String, String]`.
@@ -136,5 +146,16 @@ pub mod Weft.Cookie {
                         case None => acc
                     }
                 }, Map.empty())
+
+    ///
+    /// Parses and merges multiple incoming `Cookie` header values (per RFC 9113 HTTP/2,
+    /// clients may split cookies across multiple `cookie` header fields).
+    ///
+    pub def parseHeaders(headerVals: List[String]): Map[String, String] =
+        List.foldLeft(
+            (acc, hv) -> Map.unionWith((_, v2) -> v2, acc, parseHeader(hv)),
+            Map.empty(),
+            headerVals
+        )
 
 }

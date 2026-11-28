@@ -45,6 +45,9 @@ pub mod Weft.Req {
     pub def signedCookie(secret: String, name: String): Option[String] \ Req =
         cookie(name) |> Option.flatMap(Weft.Cookie.verifySigned(secret))
     pub def bearerToken(): Option[String] \ Req                = Request.bearerToken(Req.request())
+    pub def remoteAddr(): Option[String] \ Req                 = Request.remoteAddr(Req.request())
+    pub def clientIp(trustedProxies: List[String]): Option[String] \ Req =
+        Request.clientIp(trustedProxies, Req.request())
 
     // --- Validating Extractors (`Req` + `HttpError`) ---
 

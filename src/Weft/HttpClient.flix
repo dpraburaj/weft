@@ -90,17 +90,74 @@ pub mod Weft.HttpClient {
     // --- Production JDK 21 HttpClient Handler ---
 
     ///
-    /// Handles `HttpClient` using JDK 21's built-in `java.net.http.HttpClient`.
+    /// Reusable, thread-safe handle wrapping a pooled JDK 21 `java.net.http.HttpClient`.
+    /// Create once at application startup with `HttpClient.makeJdk()`, pass into
+    /// `HttpClient.runWithJdkClient(client, ...)` inside your `App[IO]` wiring, and close on
+    /// shutdown with `HttpClient.closeJdk(client)` to reuse TCP/TLS connections and avoid
+    /// leaking selector threads.
     ///
-    pub def runWithJdk(f: Unit -> a \ ef): a \ (ef - HttpClient) + IO = {
+    pub enum JdkHttpClient {
+        case JdkHttpClient(JHttpClient)
+    }
+
+    ///
+    /// Creates a reusable pooled JDK 21 `JdkHttpClient` with a 10-second connect timeout.
+    ///
+    pub def makeJdk(): JdkHttpClient \ IO =
+        makeJdkWithTimeout(10i64)
+
+    ///
+    /// Creates a reusable pooled JDK 21 `JdkHttpClient` with a custom connect timeout in seconds.
+    ///
+    pub def makeJdkWithTimeout(connectTimeoutSec: Int64): JdkHttpClient \ IO = {
+        let safeSecs = Int64.max(1i64, connectTimeoutSec);
         let b0 = JHttpClient.newBuilder();
         let b1 = b0.followRedirects(JRedirect.NORMAL);
-        let b2 = b1.connectTimeout(Duration.ofSeconds(10i64));
-        let client = b2.build();
+        let b2 = b1.connectTimeout(Duration.ofSeconds(safeSecs));
+        JdkHttpClient.JdkHttpClient(b2.build())
+    }
+
+    ///
+    /// Closes a `JdkHttpClient`, releasing its underlying connection pool and selector threads.
+    ///
+    pub def closeJdk(client: JdkHttpClient): Unit \ IO = {
+        let JdkHttpClient.JdkHttpClient(jClient) = client;
+        try {
+            jClient.close()
+        } catch {
+            case _: Exception => ()
+        }
+    }
+
+    ///
+    /// Handles `HttpClient` against a shared, long-lived `JdkHttpClient` (recommended for
+    /// production servers to reuse pooled HTTP/1.1 & HTTP/2 connections across requests).
+    ///
+    pub def runWithJdkClient(client: JdkHttpClient, f: Unit -> a \ ef): a \ (ef - HttpClient) + IO = {
+        let JdkHttpClient.JdkHttpClient(jClient) = client;
         run {
             f()
         } with handler HttpClient {
-            def send(req, k) = k(executeJdk(client, req))
+            def send(req, k) = k(executeJdk(jClient, req))
+        }
+    }
+
+    ///
+    /// Convenience handler creating a scoped JDK 21 `HttpClient` and closing it automatically
+    /// when `f` completes so one-off scripts/tests never leak selector threads.
+    /// For high-throughput HTTP servers, prefer creating one client at startup with
+    /// `HttpClient.makeJdk()` and wiring `HttpClient.runWithJdkClient(client)`.
+    ///
+    pub def runWithJdk(f: Unit -> a \ ef): a \ (ef - HttpClient) + IO = {
+        let client = makeJdk();
+        try {
+            let res = runWithJdkClient(client, f);
+            closeJdk(client);
+            res
+        } catch {
+            case ex: Exception =>
+                closeJdk(client);
+                throw ex
         }
     }
 

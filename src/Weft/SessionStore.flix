@@ -67,11 +67,20 @@ pub mod Weft.SessionStore {
     // --- 2. Thread-Safe Concurrent In-Memory Backend ---
 
     ///
-    /// Creates a new thread-safe in-memory session store for concurrent virtual-thread servers.
+    /// Creates a new thread-safe bounded in-memory session store (default capacity: 100,000 sessions)
+    /// for concurrent virtual-thread servers.
     ///
     pub def makeInMemory(): InMemorySessionStore \ IO =
+        makeInMemoryWithCapacity(100000)
+
+    ///
+    /// Creates a thread-safe in-memory session store bounded to at most `maxEntries` sessions,
+    /// pruning expired entries and evicting the earliest-expiring session when full.
+    ///
+    pub def makeInMemoryWithCapacity(maxEntries: Int32): InMemorySessionStore \ IO =
         InMemorySessionStore.InMemorySessionStore(
             new ReentrantLock(),
+            Int32.max(1, maxEntries),
             Ref.fresh(Static, Map.empty())
         )
 
@@ -88,11 +97,24 @@ pub mod Weft.SessionStore {
         }
     }
 
+    def evictOldestSession(m: Map[String, SessionData]): Map[String, SessionData] = {
+        let victimOpt = Map.foldLeftWithKey((acc, sid, s) -> match acc {
+            case None => Some((sid, SessionData.expiresAtMs(s)))
+            case Some((_, bestExp)) =>
+                let exp = SessionData.expiresAtMs(s);
+                if (exp < bestExp) Some((sid, exp)) else acc
+        }, None, m);
+        match victimOpt {
+            case Some((sid, _)) => Map.remove(sid, m)
+            case None           => m
+        }
+    }
+
     ///
     /// Handles `SessionStore` against a shared thread-safe `InMemorySessionStore`.
     ///
     pub def runInMemory(store: InMemorySessionStore, f: Unit -> a \ ef): a \ (ef - SessionStore) + IO = {
-        let InMemorySessionStore.InMemorySessionStore(lock, mapRef) = store;
+        let InMemorySessionStore.InMemorySessionStore(lock, maxEntries, mapRef) = store;
         run {
             f()
         } with handler SessionStore {
@@ -112,9 +134,18 @@ pub mod Weft.SessionStore {
                 k(found)
             }
             def saveSession(session, k) = {
-                withLock(lock, () ->
-                    Ref.transform(m -> Map.insert(SessionData.id(session), session, m), mapRef)
-                );
+                withLock(lock, () -> {
+                    let sid = SessionData.id(session);
+                    let cur = Ref.get(mapRef);
+                    let prepared = if (Map.memberOf(sid, cur) or Map.size(cur) < maxEntries) {
+                        cur
+                    } else {
+                        let nowMs = SessionData.updatedAtMs(session);
+                        let pruned = Map.filter(s -> not SessionData.isExpired(nowMs, s), cur);
+                        if (Map.size(pruned) < maxEntries) pruned else evictOldestSession(pruned)
+                    };
+                    Ref.put(Map.insert(sid, session, prepared), mapRef)
+                });
                 k()
             }
             def deleteSession(id, k) = {

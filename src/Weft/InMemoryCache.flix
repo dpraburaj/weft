@@ -7,6 +7,7 @@ pub mod Weft.InMemoryCache {
     pub enum InMemoryCache {
         case InMemoryCache(
             ReentrantLock,
+            Int32,
             Ref[Map[String, (String, Option[Int64])], Static],
             Ref[Map[String, (String, Int64)], Static]
         )
